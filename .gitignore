@@ -1,0 +1,12 @@
+build/
+cmake-build-*/
+*.elf
+*.elf.map
+*.bin
+*.hex
+*.uf2
+*.dis
+compile_commands.json
+
+.vscode/*
+!.vscode/extensions.json
