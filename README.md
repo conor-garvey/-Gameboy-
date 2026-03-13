@@ -115,23 +115,3 @@ If you use the Raspberry Pi Pico VS Code extension, the included `.vscode/extens
 - `Y`: GPIO `9`
 
 All buttons are configured as active-low inputs with internal pull-ups enabled.
-
-## Suggested GitHub Contents
-
-Commit the source files and build metadata:
-
-- `CMakeLists.txt`
-- `pico_sdk_import.cmake`
-- `main.c`
-- `ili9341_mono.c`
-- `ili9341_mono.h`
-- `lsm6ds3.c`
-- `lsm6ds3.h`
-- `.gitignore`
-- `README.md`
-
-Do not commit generated output such as `build/`.
-
-## Release Tip
-
-If you want non-developers to try the project, publish `3C10.uf2` as a GitHub Release asset instead of checking build artifacts into the repository.
