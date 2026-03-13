@@ -72,4 +72,3 @@ target_link_libraries(3C10
         )
 
 pico_add_extra_outputs(3C10)
-
