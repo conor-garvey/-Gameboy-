@@ -36,12 +36,14 @@ pico_sdk_init()
 # Add executable. Default name is the project name, version 0.1
 
 add_executable(PicoBoy
+        src/audio_engine.cpp
         src/buttons.cpp
         src/main.cpp
         src/display.cpp
         src/lsm6dsl.cpp
         src/menu_app.cpp
         src/plumber_man_game.cpp
+        src/profile_store.cpp
         src/sky_dodger_game.cpp
 )
 
@@ -55,8 +57,11 @@ pico_enable_stdio_usb(PicoBoy 1)
 # Add the standard library to the build
 target_link_libraries(PicoBoy
         pico_stdlib
+        hardware_flash
+        hardware_pwm
         hardware_spi
-        hardware_i2c)
+        hardware_i2c
+        hardware_sync)
 
 # Add the standard include files to the build
 target_include_directories(PicoBoy PRIVATE

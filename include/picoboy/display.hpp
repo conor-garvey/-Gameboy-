@@ -26,7 +26,7 @@ public:
     static constexpr uint16_t MaxWidth = 320;
     static constexpr uint16_t MaxHeight = 320;
     static constexpr int16_t StripHeight = 16;
-    static constexpr size_t MaxCommands = 128;
+    static constexpr size_t MaxCommands = 256;
     static constexpr size_t MaxTextBytes = 512;
     static constexpr int16_t FontWidth = 5;
     static constexpr int16_t FontHeight = 7;

@@ -2,6 +2,8 @@
 
 #include <cstdio>
 
+#include "picoboy/avatar_art.hpp"
+
 namespace picoboy {
 
 namespace {
@@ -18,9 +20,15 @@ struct Coin {
     int16_t y;
 };
 
+struct EnemySpawn {
+    int16_t x;
+    int16_t y;
+    int16_t min_x;
+    int16_t max_x;
+};
+
 constexpr int16_t world_width = 1024;
 constexpr int16_t world_height = 240;
-constexpr int16_t ground_y = 216;
 constexpr int16_t flag_x = 972;
 constexpr Rect platforms[] = {
     {0, 216, 230, 24},
@@ -42,6 +50,13 @@ constexpr Coin coins[] = {
     {668, 122},
     {828, 150},
     {930, 186},
+};
+constexpr EnemySpawn enemy_spawns[] = {
+    {320, 202, 296, 412},
+    {522, 202, 506, 650},
+    {340, 152, 338, 372},
+    {810, 152, 810, 854},
+    {760, 202, 736, 944},
 };
 
 bool intersects(int16_t ax, int16_t ay, int16_t aw, int16_t ah,
@@ -70,13 +85,27 @@ Display::Color grassColor() {
 
 }
 
+PlumberManGame::PlumberManGame(AudioEngine& audio) : audio_(audio) {}
+
 void PlumberManGame::enter() {
     resetLevel();
 }
 
+void PlumberManGame::setAvatar(AvatarId avatar) {
+    avatar_ = sanitizeAvatarId(static_cast<uint8_t>(avatar));
+}
+
 void PlumberManGame::update(const Buttons& buttons) {
     if (buttons.pressed(ButtonId::Select)) {
-        exit_requested_ = true;
+        paused_ = !paused_;
+        editing_volume_ = false;
+        pause_selection_ = PauseSelection::ReturnToMenu;
+        audio_.playEffect(SoundEffect::MenuMove);
+        return;
+    }
+
+    if (paused_) {
+        updatePauseMenu(buttons);
         return;
     }
 
@@ -97,7 +126,7 @@ void PlumberManGame::update(const Buttons& buttons) {
     }
 
     if ((buttons.pressed(ButtonId::A) || buttons.pressed(ButtonId::Up)) && on_ground_) {
-        velocity_y_ = -10;
+        velocity_y_ = JumpVelocity;
         on_ground_ = false;
     }
 
@@ -108,6 +137,10 @@ void PlumberManGame::update(const Buttons& buttons) {
     movePlayerY(velocity_y_);
     collectCoins();
 
+    if (updateEnemies()) {
+        return;
+    }
+
     if (player_y_ > world_height + 32) {
         resetLevel();
         return;
@@ -115,6 +148,12 @@ void PlumberManGame::update(const Buttons& buttons) {
 
     if (player_x_ + PlayerWidth >= flag_x) {
         won_ = true;
+        if (!completion_report_pending_) {
+            pending_completion_time_ms_ = static_cast<uint32_t>(
+                absolute_time_diff_us(run_started_, get_absolute_time()) / 1000);
+            pending_completion_coins_ = coins_collected_;
+            completion_report_pending_ = true;
+        }
     }
 }
 
@@ -165,6 +204,27 @@ void PlumberManGame::render(Display& display) const {
         display.drawRect(screen_x, screen_y, 6, 10, Display::rgb565(255, 248, 120));
     }
 
+    for (const Enemy& enemy : enemies_) {
+        if (!enemy.alive) {
+            continue;
+        }
+
+        const int16_t screen_x = static_cast<int16_t>(enemy.x - camera_x);
+        const int16_t screen_y = static_cast<int16_t>(enemy.y + world_y_offset);
+
+        if (screen_x + EnemyWidth < 0 || screen_x >= screen_width) {
+            continue;
+        }
+
+        display.fillRect(screen_x, screen_y, EnemyWidth, EnemyHeight, Display::rgb565(170, 112, 54));
+        display.fillRect(screen_x, static_cast<int16_t>(screen_y + EnemyHeight - 4), EnemyWidth, 4,
+                         Display::rgb565(112, 62, 22));
+        display.fillRect(static_cast<int16_t>(screen_x + 3), static_cast<int16_t>(screen_y + 4), 2, 2,
+                         Display::rgb565(255, 255, 255));
+        display.fillRect(static_cast<int16_t>(screen_x + 9), static_cast<int16_t>(screen_y + 4), 2, 2,
+                         Display::rgb565(255, 255, 255));
+    }
+
     const int16_t flag_screen_x = static_cast<int16_t>(flag_x - camera_x);
     display.fillRect(flag_screen_x, static_cast<int16_t>(90 + world_y_offset), 4, 126, Display::rgb565(230, 230, 230));
     display.fillRect(static_cast<int16_t>(flag_screen_x + 4), static_cast<int16_t>(94 + world_y_offset), 26, 18,
@@ -172,11 +232,7 @@ void PlumberManGame::render(Display& display) const {
 
     const int16_t player_screen_x = static_cast<int16_t>(player_x_ - camera_x);
     const int16_t player_screen_y = static_cast<int16_t>(player_y_ + world_y_offset);
-    display.fillRect(player_screen_x, player_screen_y, PlayerWidth, PlayerHeight, Display::rgb565(210, 48, 48));
-    display.fillRect(player_screen_x, static_cast<int16_t>(player_screen_y + 10), PlayerWidth, 6,
-                     Display::rgb565(30, 90, 210));
-    display.fillRect(static_cast<int16_t>(player_screen_x + 3), static_cast<int16_t>(player_screen_y - 4), 6, 5,
-                     Display::rgb565(230, 40, 40));
+    drawPlayerAvatar(display, player_screen_x, player_screen_y, avatar_);
 
     display.fillRect(0, 0, screen_width, 24, Display::rgb565(10, 22, 56));
     display.drawText(10, 8, "PLUMBER MAN", Display::rgb565(255, 255, 255), 1);
@@ -199,8 +255,12 @@ void PlumberManGame::render(Display& display) const {
         display.drawText(static_cast<int16_t>(box_x + 26), static_cast<int16_t>(box_y + 40), "START = RESTART",
                          Display::rgb565(180, 220, 255), 1);
     } else {
-        display.drawText(12, static_cast<int16_t>(screen_height - 16), "A JUMP  B RUN  SELECT EXIT",
+        display.drawText(10, static_cast<int16_t>(screen_height - 16), "A JUMP  B RUN  SELECT PAUSE",
                          Display::rgb565(240, 240, 240), 1);
+    }
+
+    if (paused_) {
+        renderPauseOverlay(display);
     }
 
     display.present();
@@ -214,6 +274,17 @@ void PlumberManGame::clearExitRequest() {
     exit_requested_ = false;
 }
 
+bool PlumberManGame::consumeCompletedRun(uint32_t& completion_time_ms, uint8_t& coins_collected) {
+    if (!completion_report_pending_) {
+        return false;
+    }
+
+    completion_time_ms = pending_completion_time_ms_;
+    coins_collected = pending_completion_coins_;
+    completion_report_pending_ = false;
+    return true;
+}
+
 void PlumberManGame::resetLevel() {
     player_x_ = 28;
     player_y_ = 196;
@@ -221,10 +292,27 @@ void PlumberManGame::resetLevel() {
     on_ground_ = false;
     won_ = false;
     exit_requested_ = false;
+    paused_ = false;
+    editing_volume_ = false;
+    pause_selection_ = PauseSelection::ReturnToMenu;
     coins_collected_ = 0;
+    run_started_ = get_absolute_time();
 
     for (bool& collected : coin_collected_) {
         collected = false;
+    }
+
+    resetEnemies();
+}
+
+void PlumberManGame::resetEnemies() {
+    for (size_t index = 0; index < enemies_.size(); ++index) {
+        enemies_[index].x = enemy_spawns[index].x;
+        enemies_[index].y = enemy_spawns[index].y;
+        enemies_[index].min_x = enemy_spawns[index].min_x;
+        enemies_[index].max_x = enemy_spawns[index].max_x;
+        enemies_[index].direction = index % 2 == 0 ? 1 : -1;
+        enemies_[index].alive = true;
     }
 }
 
@@ -238,8 +326,150 @@ void PlumberManGame::collectCoins() {
                        coins[index].x, coins[index].y, 6, 10)) {
             coin_collected_[index] = true;
             ++coins_collected_;
+            audio_.playEffect(SoundEffect::Coin);
         }
     }
+}
+
+bool PlumberManGame::updateEnemies() {
+    for (Enemy& enemy : enemies_) {
+        if (!enemy.alive) {
+            continue;
+        }
+
+        enemy.x = static_cast<int16_t>(enemy.x + enemy.direction);
+        if (enemy.x <= enemy.min_x) {
+            enemy.x = enemy.min_x;
+            enemy.direction = 1;
+        } else if (enemy.x >= enemy.max_x) {
+            enemy.x = enemy.max_x;
+            enemy.direction = -1;
+        }
+
+        if (handleEnemyCollision(enemy)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool PlumberManGame::handleEnemyCollision(Enemy& enemy) {
+    if (!intersects(player_x_, player_y_, PlayerWidth, PlayerHeight,
+                    enemy.x, enemy.y, EnemyWidth, EnemyHeight)) {
+        return false;
+    }
+
+    const int16_t player_bottom = static_cast<int16_t>(player_y_ + PlayerHeight);
+    const bool stomping = velocity_y_ > 0 &&
+                          player_bottom <= static_cast<int16_t>(enemy.y + 8);
+
+    if (stomping) {
+        enemy.alive = false;
+        velocity_y_ = -6;
+        on_ground_ = false;
+        audio_.playEffect(SoundEffect::EnemyStomp);
+        return false;
+    }
+
+    resetLevel();
+    return true;
+}
+
+void PlumberManGame::updatePauseMenu(const Buttons& buttons) {
+    if (editing_volume_) {
+        bool changed = false;
+        if (buttons.pressed(ButtonId::Right) || buttons.pressed(ButtonId::Up)) {
+            adjustVolume(1);
+            changed = true;
+        }
+        if (buttons.pressed(ButtonId::Left) || buttons.pressed(ButtonId::Down)) {
+            adjustVolume(-1);
+            changed = true;
+        }
+        if (changed) {
+            audio_.playEffect(SoundEffect::MenuMove);
+        }
+
+        if (buttons.pressed(ButtonId::A) || buttons.pressed(ButtonId::Start) ||
+            buttons.pressed(ButtonId::B) || buttons.pressed(ButtonId::Select)) {
+            editing_volume_ = false;
+            audio_.playEffect(SoundEffect::MenuMove);
+        }
+        return;
+    }
+
+    if (buttons.pressed(ButtonId::Up) || buttons.pressed(ButtonId::Down)) {
+        pause_selection_ = pause_selection_ == PauseSelection::ReturnToMenu
+            ? PauseSelection::Volume
+            : PauseSelection::ReturnToMenu;
+        audio_.playEffect(SoundEffect::MenuMove);
+    }
+
+    if (buttons.pressed(ButtonId::B) || buttons.pressed(ButtonId::Select)) {
+        paused_ = false;
+        audio_.playEffect(SoundEffect::MenuMove);
+        return;
+    }
+
+    if (buttons.pressed(ButtonId::A) || buttons.pressed(ButtonId::Start)) {
+        if (pause_selection_ == PauseSelection::ReturnToMenu) {
+            paused_ = false;
+            exit_requested_ = true;
+        } else {
+            editing_volume_ = true;
+        }
+        audio_.playEffect(SoundEffect::MenuMove);
+    }
+}
+
+void PlumberManGame::adjustVolume(int delta) {
+    audio_.changeVolume(delta);
+}
+
+void PlumberManGame::renderPauseOverlay(Display& display) const {
+    const int16_t screen_width = static_cast<int16_t>(display.width());
+    const int16_t screen_height = static_cast<int16_t>(display.height());
+    const int16_t box_width = 210;
+    const int16_t box_height = 92;
+    const int16_t box_x = static_cast<int16_t>((screen_width - box_width) / 2);
+    const int16_t box_y = static_cast<int16_t>((screen_height - box_height) / 2);
+
+    display.fillRect(box_x, box_y, box_width, box_height, Display::rgb565(18, 28, 58));
+    display.drawRect(box_x, box_y, box_width, box_height, Display::rgb565(255, 196, 48));
+    display.drawText(static_cast<int16_t>(box_x + 68), static_cast<int16_t>(box_y + 10), "PAUSED",
+                     Display::rgb565(255, 255, 255), 2);
+
+    const bool return_selected = pause_selection_ == PauseSelection::ReturnToMenu && !editing_volume_;
+    const bool volume_selected = pause_selection_ == PauseSelection::Volume;
+    const Display::Color highlight = Display::rgb565(54, 120, 200);
+
+    if (return_selected) {
+        display.fillRect(static_cast<int16_t>(box_x + 16), static_cast<int16_t>(box_y + 36), 178, 14, highlight);
+    }
+    display.drawText(static_cast<int16_t>(box_x + 22), static_cast<int16_t>(box_y + 39), "RETURN TO MENU",
+                     Display::rgb565(255, 255, 255), 1);
+
+    if (volume_selected && !editing_volume_) {
+        display.fillRect(static_cast<int16_t>(box_x + 16), static_cast<int16_t>(box_y + 56), 178, 24, highlight);
+    }
+    display.drawText(static_cast<int16_t>(box_x + 22), static_cast<int16_t>(box_y + 59), "VOLUME",
+                     Display::rgb565(255, 255, 255), 1);
+
+    const int16_t bar_x = static_cast<int16_t>(box_x + 84);
+    const int16_t bar_y = static_cast<int16_t>(box_y + 60);
+    const int16_t bar_width = 96;
+    const int16_t bar_height = 10;
+    display.drawRect(bar_x, bar_y, bar_width, bar_height, Display::rgb565(220, 220, 240));
+    const int16_t fill_width = static_cast<int16_t>((bar_width - 2) * audio_.volume() / AudioEngine::MaxVolume);
+    if (fill_width > 0) {
+        display.fillRect(static_cast<int16_t>(bar_x + 1), static_cast<int16_t>(bar_y + 1), fill_width,
+                         static_cast<int16_t>(bar_height - 2), Display::rgb565(120, 220, 140));
+    }
+
+    display.drawText(static_cast<int16_t>(box_x + 16), static_cast<int16_t>(box_y + 78),
+                     editing_volume_ ? "UP/RIGHT +  LEFT/DOWN -" : "A SELECT  B/SELECT RESUME",
+                     Display::rgb565(200, 200, 220), 1);
 }
 
 void PlumberManGame::movePlayerX(int16_t delta) {
