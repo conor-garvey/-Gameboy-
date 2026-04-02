@@ -79,7 +79,9 @@ private:
     void formatBestTime(char* buffer, size_t buffer_size, uint32_t time_ms) const;
     const char* selectedProfileName() const;
     void applyDisplayMode(DisplayMode mode);
+    void setAudioEnabled(bool enabled);
     const char* displayModeName() const;
+    const char* audioSettingName() const;
 
     Display& display_;
     Lsm6dsl& imu_;
@@ -96,6 +98,7 @@ private:
     int selected_game_index_;
     int selected_settings_item_;
     DisplayMode display_mode_;
+    bool audio_enabled_;
     int pending_delete_index_;
     absolute_time_t notice_until_;
     std::array<char, NoticeTextSize> notice_text_;

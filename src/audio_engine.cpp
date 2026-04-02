@@ -124,7 +124,7 @@ void AudioEngine::init(uint8_t pwm_pin) {
 }
 
 void AudioEngine::startBackgroundMusic() {
-    if (!initialized_ || background_music_sample_count == 0) {
+    if (!initialized_ || !enabled_ || background_music_sample_count == 0) {
         return;
     }
 
@@ -146,8 +146,23 @@ void AudioEngine::startBackgroundMusic() {
     }
 }
 
+void AudioEngine::stopBackgroundMusic() {
+    const uint32_t interrupts = save_and_disable_interrupts();
+    music_data_ = nullptr;
+    music_sample_count_ = 0;
+    music_index_ = 0;
+    music_fraction_ = 0;
+    music_step_fp_ = 0;
+    music_enabled_ = false;
+    restore_interrupts(interrupts);
+
+    if (initialized_ && !hasActivePlayback()) {
+        disableOutput();
+    }
+}
+
 void AudioEngine::playEffect(SoundEffect effect) {
-    if (!initialized_) {
+    if (!initialized_ || !enabled_) {
         return;
     }
 
@@ -196,9 +211,32 @@ void AudioEngine::stop() {
     }
 }
 
+void AudioEngine::setEnabled(bool enabled) {
+    enabled_ = enabled;
+    if (!enabled_) {
+        stop();
+        return;
+    }
+
+    if (initialized_ && volume_ > 0 && hasActivePlayback()) {
+        enableOutput();
+    }
+}
+
+bool AudioEngine::enabled() const {
+    return enabled_;
+}
+
 void AudioEngine::setVolume(uint8_t volume) {
     volume_ = std::min<uint8_t>(volume, MaxVolume);
     if (volume_ == 0) {
+        if (initialized_) {
+            disableOutput();
+        }
+        return;
+    }
+
+    if (!enabled_) {
         if (initialized_) {
             disableOutput();
         }
@@ -221,6 +259,13 @@ void AudioEngine::changeVolume(int delta) {
 
     volume_ = static_cast<uint8_t>(next_volume);
     if (volume_ == 0) {
+        if (initialized_) {
+            disableOutput();
+        }
+        return;
+    }
+
+    if (!enabled_) {
         if (initialized_) {
             disableOutput();
         }
@@ -420,7 +465,7 @@ int16_t AudioEngine::nextMusicSample() {
 }
 
 uint8_t AudioEngine::nextPwmLevel() {
-    if (volume_ == 0) {
+    if (!enabled_ || volume_ == 0) {
         return pwm_silence;
     }
 

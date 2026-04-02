@@ -13,7 +13,7 @@ class NoiseDiagnosticApp {
 public:
     NoiseDiagnosticApp(Display& display, Lsm6dsl& imu, AudioEngine& audio);
 
-    void init();
+    void init(bool audio_test_enabled);
     void update();
     void render();
 
@@ -42,6 +42,7 @@ private:
     bool render_load_enabled_ = true;
     bool backlight_enabled_ = true;
     bool imu_poll_enabled_ = true;
+    bool audio_test_enabled_ = false;
     bool imu_sample_valid_ = false;
     bool needs_render_ = true;
     bool exit_requested_ = false;

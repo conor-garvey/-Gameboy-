@@ -44,8 +44,11 @@ public:
 
     void init(uint8_t pwm_pin = DefaultPwmPin);
     void startBackgroundMusic();
+    void stopBackgroundMusic();
     void playEffect(SoundEffect effect);
     void stop();
+    void setEnabled(bool enabled);
+    bool enabled() const;
 
     void setVolume(uint8_t volume);
     void changeVolume(int delta);
@@ -90,6 +93,7 @@ private:
     uint32_t music_fraction_ = 0;
     uint32_t music_step_fp_ = 0;
     bool music_enabled_ = false;
+    bool enabled_ = true;
 };
 
 }  // namespace picoboy

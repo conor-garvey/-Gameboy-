@@ -27,9 +27,14 @@ Display::Color accentColor() {
 NoiseDiagnosticApp::NoiseDiagnosticApp(Display& display, Lsm6dsl& imu, AudioEngine& audio)
     : display_(display), imu_(imu), audio_(audio), buttons_() {}
 
-void NoiseDiagnosticApp::init() {
+void NoiseDiagnosticApp::init(bool audio_test_enabled) {
     buttons_.init();
-    audio_.stop();
+    audio_test_enabled_ = audio_test_enabled;
+    if (audio_test_enabled_) {
+        audio_.startBackgroundMusic();
+    } else {
+        audio_.stop();
+    }
     render_load_enabled_ = true;
     backlight_enabled_ = true;
     imu_poll_enabled_ = true;
@@ -99,6 +104,8 @@ void NoiseDiagnosticApp::render() {
     }
 
     const int16_t screen_width = static_cast<int16_t>(display_.width());
+    char audio_text[40];
+    std::snprintf(audio_text, sizeof(audio_text), "AUDIO TEST %s", onOffText(audio_test_enabled_));
 
     display_.beginFrame(backgroundColor());
     display_.fillRect(0, 0, screen_width, 28, panelColor());
@@ -124,20 +131,22 @@ void NoiseDiagnosticApp::render() {
         display_.drawText(state_x, static_cast<int16_t>(y + 7), state_text, accentColor(), 1);
     }
 
-    display_.drawText(20, 136, "A/L/R TOGGLE   START EXIT", Display::rgb565(220, 220, 220), 1);
-    display_.drawText(20, 150, "AUDIO PIN IS FORCED LOW HERE", Display::rgb565(255, 220, 140), 1);
+    display_.drawText(20, 140, "A/L/R TOGGLE   START EXIT", Display::rgb565(220, 220, 220), 1);
+    display_.drawText(20, 154, audio_text,
+                      audio_test_enabled_ ? Display::rgb565(160, 240, 180) : Display::rgb565(255, 220, 140), 1);
+    display_.drawText(20, 168, "AUDIO IGNORES SCREEN/BACKLIGHT TESTS", Display::rgb565(255, 220, 140), 1);
 
     if (!imu_.ready()) {
-        display_.drawText(20, 166, "IMU NOT READY", Display::rgb565(255, 120, 120), 1);
+        display_.drawText(20, 178, "IMU NOT READY", Display::rgb565(255, 120, 120), 1);
     } else if (imu_sample_valid_) {
         char imu_text[48];
         std::snprintf(imu_text, sizeof(imu_text), "IMU RAW X:%d Y:%d Z:%d",
                       static_cast<int>(imu_raw_x_),
                       static_cast<int>(imu_raw_y_),
                       static_cast<int>(imu_raw_z_));
-        display_.drawText(20, 166, imu_text, Display::rgb565(160, 220, 255), 1);
+        display_.drawText(20, 178, imu_text, Display::rgb565(160, 220, 255), 1);
     } else {
-        display_.drawText(20, 166, "IMU POLL IS OFF", Display::rgb565(160, 220, 255), 1);
+        display_.drawText(20, 178, "IMU POLL IS OFF", Display::rgb565(160, 220, 255), 1);
     }
 
     if (render_load_enabled_) {
@@ -146,13 +155,13 @@ void NoiseDiagnosticApp::render() {
             const Display::Color color = Display::rgb565(static_cast<uint8_t>(32 + offset * 3),
                                                          static_cast<uint8_t>(100 + offset * 2),
                                                          static_cast<uint8_t>(140 + offset));
-            display_.fillRect(stripe, 182, 12, 14, color);
+            display_.fillRect(stripe, 190, 12, 14, color);
         }
-        drawCenteredText(198, "SCREEN LOAD ON = CONTINUOUS SPI", Display::rgb565(220, 220, 220), 1);
-        drawCenteredText(208, "UPDATES", Display::rgb565(220, 220, 220), 1);
+        drawCenteredText(208, "SCREEN LOAD ON = CONTINUOUS SPI", Display::rgb565(220, 220, 220), 1);
+        drawCenteredText(218, "UPDATES", Display::rgb565(220, 220, 220), 1);
     } else {
-        drawCenteredText(198, "SCREEN LOAD OFF = REDRAW ONLY", Display::rgb565(220, 220, 220), 1);
-        drawCenteredText(208, "WHEN SOMETHING CHANGES", Display::rgb565(220, 220, 220), 1);
+        drawCenteredText(208, "SCREEN LOAD OFF = REDRAW ONLY", Display::rgb565(220, 220, 220), 1);
+        drawCenteredText(218, "WHEN SOMETHING CHANGES", Display::rgb565(220, 220, 220), 1);
     }
 
     display_.present();

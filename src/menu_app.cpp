@@ -79,6 +79,7 @@ MenuApp::MenuApp(Display& display, Lsm6dsl& imu)
       selected_game_index_(0),
       selected_settings_item_(0),
       display_mode_(DisplayMode::Quiet),
+      audio_enabled_(true),
       pending_delete_index_(-1),
       notice_until_(get_absolute_time()),
       notice_text_{},
@@ -88,9 +89,8 @@ MenuApp::MenuApp(Display& display, Lsm6dsl& imu)
 
 void MenuApp::init() {
     audio_.init();
+    setAudioEnabled(audio_enabled_);
     applyDisplayMode(display_mode_);
-    audio_.playEffect(SoundEffect::PowerOn);
-    audio_.startBackgroundMusic();
     buttons_.init();
     boot_started_ = get_absolute_time();
     notice_text_[0] = '\0';
@@ -129,7 +129,7 @@ void MenuApp::update() {
     case Screen::NoiseDiagnostic:
         noise_diagnostic_.update();
         if (noise_diagnostic_.exitRequested()) {
-            audio_.startBackgroundMusic();
+            audio_.stop();
             display_.backlightOn();
             screen_ = Screen::Settings;
             setNotice("BACK TO SETTINGS", 900);
@@ -141,6 +141,7 @@ void MenuApp::update() {
         updatePlumberStats();
         if (plumber_man_.exitRequested()) {
             plumber_man_.clearExitRequest();
+            audio_.stop();
             screen_ = Screen::GameSelect;
             setNotice("BACK TO GAMES", 900);
         }
@@ -151,6 +152,7 @@ void MenuApp::update() {
         updateSkyDodgerStats();
         if (sky_dodger_.exitRequested()) {
             sky_dodger_.clearExitRequest();
+            audio_.stop();
             screen_ = Screen::GameSelect;
             setNotice("BACK TO GAMES", 900);
         }
@@ -214,11 +216,9 @@ void MenuApp::updateProfileSelect() {
         if (buttons_.pressed(ButtonId::A) || buttons_.pressed(ButtonId::Start)) {
             deleteProfile(pending_delete_index_);
             pending_delete_index_ = -1;
-            audio_.playEffect(SoundEffect::MenuMove);
             setNotice("PROFILE DELETED", 1200);
         } else if (buttons_.pressed(ButtonId::B) || buttons_.pressed(ButtonId::Select)) {
             pending_delete_index_ = -1;
-            audio_.playEffect(SoundEffect::MenuMove);
             setNotice("DELETE CANCELED", 900);
         }
 
@@ -227,34 +227,28 @@ void MenuApp::updateProfileSelect() {
 
     if (buttons_.pressed(ButtonId::Up) && selected_profile_entry_ > 0) {
         --selected_profile_entry_;
-        audio_.playEffect(SoundEffect::MenuMove);
     }
 
     if (buttons_.pressed(ButtonId::Down) && selected_profile_entry_ < clamped_last_entry) {
         ++selected_profile_entry_;
-        audio_.playEffect(SoundEffect::MenuMove);
     }
 
     if (buttons_.pressed(ButtonId::Left)) {
         cycleSelectedAvatar(-1);
-        audio_.playEffect(SoundEffect::MenuMove);
     }
 
     if (buttons_.pressed(ButtonId::Right)) {
         cycleSelectedAvatar(1);
-        audio_.playEffect(SoundEffect::MenuMove);
     }
 
     if (buttons_.pressed(ButtonId::B) && !selectedEntryIsCreateNew() && profileCount() > 0) {
         pending_delete_index_ = selected_profile_entry_;
-        audio_.playEffect(SoundEffect::MenuMove);
         return;
     }
 
     if (buttons_.pressed(ButtonId::A) || buttons_.pressed(ButtonId::Start)) {
         if (selectedEntryIsCreateNew()) {
             createProfile();
-            audio_.playEffect(SoundEffect::MenuMove);
             selected_game_index_ = 0;
             screen_ = Screen::GameSelect;
             setNotice("PROFILE CREATED", 1200);
@@ -263,7 +257,6 @@ void MenuApp::updateProfileSelect() {
 
         if (selected_profile_entry_ < static_cast<int>(profileCount())) {
             active_profile_index_ = selected_profile_entry_;
-            audio_.playEffect(SoundEffect::MenuMove);
             selected_game_index_ = 0;
             screen_ = Screen::GameSelect;
             setNotice(selectedProfileName(), 1200);
@@ -281,16 +274,13 @@ void MenuApp::updateGameSelect() {
 
     if (buttons_.pressed(ButtonId::Up) && selected_game_index_ > 0) {
         --selected_game_index_;
-        audio_.playEffect(SoundEffect::MenuMove);
     }
 
     if (buttons_.pressed(ButtonId::Down) && selected_game_index_ < 2) {
         ++selected_game_index_;
-        audio_.playEffect(SoundEffect::MenuMove);
     }
 
     if (buttons_.pressed(ButtonId::B) || buttons_.pressed(ButtonId::Select)) {
-        audio_.playEffect(SoundEffect::MenuMove);
         screen_ = Screen::ProfileSelect;
         selected_profile_entry_ = active_profile_index_ >= 0 ? active_profile_index_ : createEntryIndex();
         pending_delete_index_ = -1;
@@ -306,7 +296,8 @@ void MenuApp::updateGameSelect() {
 
         if (selected_game_index_ == 0) {
             plumber_man_.setAvatar(sanitizeAvatar(profile->avatar));
-            audio_.playEffect(SoundEffect::MenuMove);
+            audio_.stop();
+            audio_.startBackgroundMusic();
             plumber_man_.enter();
             screen_ = Screen::PlumberMan;
             return;
@@ -319,13 +310,13 @@ void MenuApp::updateGameSelect() {
             }
 
             sky_dodger_.setAvatar(sanitizeAvatar(profile->avatar));
-            audio_.playEffect(SoundEffect::MenuMove);
+            audio_.stop();
+            audio_.startBackgroundMusic();
             sky_dodger_.enter(display_);
             screen_ = Screen::SkyDodger;
             return;
         }
 
-        audio_.playEffect(SoundEffect::MenuMove);
         selected_settings_item_ = 0;
         screen_ = Screen::Settings;
         setNotice("SYSTEM SETTINGS", 1200);
@@ -333,20 +324,17 @@ void MenuApp::updateGameSelect() {
 }
 
 void MenuApp::updateSettings() {
-    constexpr int settings_item_count = 2;
+    constexpr int settings_item_count = 3;
 
     if (buttons_.pressed(ButtonId::Up) && selected_settings_item_ > 0) {
         --selected_settings_item_;
-        audio_.playEffect(SoundEffect::MenuMove);
     }
 
     if (buttons_.pressed(ButtonId::Down) && selected_settings_item_ < settings_item_count - 1) {
         ++selected_settings_item_;
-        audio_.playEffect(SoundEffect::MenuMove);
     }
 
     if (buttons_.pressed(ButtonId::B) || buttons_.pressed(ButtonId::Select)) {
-        audio_.playEffect(SoundEffect::MenuMove);
         screen_ = Screen::GameSelect;
         setNotice("BACK TO GAMES", 900);
         return;
@@ -359,15 +347,22 @@ void MenuApp::updateSettings() {
                 ? DisplayMode::Original
                 : DisplayMode::Quiet;
             applyDisplayMode(display_mode_);
-            audio_.playEffect(SoundEffect::MenuMove);
             setNotice(display_mode_ == DisplayMode::Quiet ? "QUIET DISPLAY MODE" : "ORIGINAL DISPLAY MODE", 1200);
         }
         return;
     }
 
+    if (selected_settings_item_ == 1) {
+        if (buttons_.pressed(ButtonId::Left) || buttons_.pressed(ButtonId::Right) ||
+            buttons_.pressed(ButtonId::A) || buttons_.pressed(ButtonId::Start)) {
+            setAudioEnabled(!audio_enabled_);
+            setNotice(audio_enabled_ ? "GAME AUDIO ON" : "GAME AUDIO OFF", 1200);
+        }
+        return;
+    }
+
     if (buttons_.pressed(ButtonId::A) || buttons_.pressed(ButtonId::Start)) {
-        audio_.playEffect(SoundEffect::MenuMove);
-        noise_diagnostic_.init();
+        noise_diagnostic_.init(audio_enabled_);
         screen_ = Screen::NoiseDiagnostic;
     }
 }
@@ -565,10 +560,10 @@ void MenuApp::renderSettings() {
 
     const int16_t item_x = 18;
     const int16_t item_width = static_cast<int16_t>(screen_width - 36);
-    const int16_t first_y = 52;
-    const int16_t gap = 38;
+    const int16_t first_y = 46;
+    const int16_t gap = 34;
 
-    for (int item = 0; item < 2; ++item) {
+    for (int item = 0; item < 3; ++item) {
         const int16_t y = static_cast<int16_t>(first_y + item * gap);
         const bool selected = selected_settings_item_ == item;
         const Display::Color fill = selected ? selectedColor() : panelColor();
@@ -582,6 +577,12 @@ void MenuApp::renderSettings() {
             const char* mode_text = displayModeName();
             const int16_t mode_x = static_cast<int16_t>(screen_width - display_.measureTextWidth(mode_text, 1) - 30);
             display_.drawText(mode_x, static_cast<int16_t>(y + 9), mode_text, accentColor(), 1);
+        } else if (item == 1) {
+            display_.drawText(static_cast<int16_t>(item_x + 12), static_cast<int16_t>(y + 9),
+                              "GAME AUDIO", Display::rgb565(255, 255, 255), 1);
+            const char* audio_text = audioSettingName();
+            const int16_t audio_x = static_cast<int16_t>(screen_width - display_.measureTextWidth(audio_text, 1) - 30);
+            display_.drawText(audio_x, static_cast<int16_t>(y + 9), audio_text, accentColor(), 1);
         } else {
             display_.drawText(static_cast<int16_t>(item_x + 12), static_cast<int16_t>(y + 9),
                               "NOISE DIAGNOSTIC", Display::rgb565(255, 255, 255), 1);
@@ -594,19 +595,22 @@ void MenuApp::renderSettings() {
     std::snprintf(config_text, sizeof(config_text), "SPI %lu MHz   FPS %lu",
                   static_cast<unsigned long>(display_.spiClockHz() / 1000000u),
                   static_cast<unsigned long>(display_.targetFps()));
-    drawCenteredText(138, config_text, Display::rgb565(160, 220, 255), 1);
-    drawCenteredText(154, "QUIET = 10MHZ / 30FPS", Display::rgb565(220, 220, 220), 1);
-    drawCenteredText(166, "ORIGINAL = 20MHZ / 60FPS", Display::rgb565(220, 220, 220), 1);
+    drawCenteredText(142, config_text, Display::rgb565(160, 220, 255), 1);
+    drawCenteredText(156, "QUIET = 10MHZ / 30FPS", Display::rgb565(220, 220, 220), 1);
+    drawCenteredText(168, "ORIGINAL = 20MHZ / 60FPS", Display::rgb565(220, 220, 220), 1);
+    drawCenteredText(180, "AUDIO = GAMES + DIAGNOSTIC ONLY", Display::rgb565(220, 220, 220), 1);
 
     if (notice_text_[0] != '\0' && !timeReached(notice_until_)) {
-        drawCenteredText(184, notice_text_.data(), Display::rgb565(255, 220, 140), 1);
+        drawCenteredText(194, notice_text_.data(), Display::rgb565(255, 220, 140), 1);
     } else if (selected_settings_item_ == 0) {
-        drawCenteredText(184, "LEFT/RIGHT/A TO SWITCH DISPLAY MODE", Display::rgb565(255, 220, 140), 1);
+        drawCenteredText(194, "LEFT/RIGHT/A TO SWITCH DISPLAY MODE", Display::rgb565(255, 220, 140), 1);
+    } else if (selected_settings_item_ == 1) {
+        drawCenteredText(194, "LEFT/RIGHT/A TO TOGGLE GAME AUDIO", Display::rgb565(255, 220, 140), 1);
     } else {
-        drawCenteredText(184, "RUN THE DIAGNOSTIC LISTEN TEST", Display::rgb565(255, 220, 140), 1);
+        drawCenteredText(194, "RUN THE DIAGNOSTIC LISTEN TEST", Display::rgb565(255, 220, 140), 1);
     }
 
-    drawCenteredText(204, "B OR SELECT = BACK", Display::rgb565(200, 200, 200), 1);
+    drawCenteredText(214, "B OR SELECT = BACK", Display::rgb565(200, 200, 200), 1);
     display_.present();
 }
 
@@ -891,8 +895,20 @@ void MenuApp::applyDisplayMode(DisplayMode mode) {
     }
 }
 
+void MenuApp::setAudioEnabled(bool enabled) {
+    audio_enabled_ = enabled;
+    audio_.setEnabled(audio_enabled_);
+    if (!audio_enabled_) {
+        audio_.stop();
+    }
+}
+
 const char* MenuApp::displayModeName() const {
     return display_mode_ == DisplayMode::Quiet ? "QUIET" : "ORIGINAL";
+}
+
+const char* MenuApp::audioSettingName() const {
+    return audio_enabled_ ? "ON" : "OFF";
 }
 
 }  // namespace picoboy

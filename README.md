@@ -168,6 +168,7 @@ display.setViewport(320, 240);
 
 - open from the `SETTINGS` item in the game-select screen
 - switch `DISPLAY MODE` between `QUIET` and `ORIGINAL`
+- toggle `GAME AUDIO` on or off
 - run `NOISE DIAGNOSTIC` from the settings screen
 
 ### Plumber Man
@@ -197,11 +198,13 @@ Inside the diagnostic:
 - `A`, `LEFT`, or `RIGHT` toggle the selected item
 - `START` exits back to the normal menu
 
-The diagnostic keeps the audio pin forced low and lets you toggle:
+If `GAME AUDIO` is enabled in settings, the diagnostic keeps the audio playing while you toggle:
 
 - `SCREEN LOAD` to turn continuous display SPI updates on or off
 - `BACKLIGHT` to turn the display backlight on or off
 - `IMU POLL` to turn repeated IMU reads on or off
+
+Menu screens stay silent. Audio is used in the games and in the diagnostic only.
 
 ## Notes
 
