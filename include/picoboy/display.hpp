@@ -40,7 +40,8 @@ public:
     static constexpr uint8_t PinRst = 21;
     static constexpr uint8_t PinLed = 22;
 
-    static constexpr uint32_t SpiClockHz = 20 * 1000 * 1000;
+    static constexpr uint32_t SpiClockHz = 10 * 1000 * 1000;
+    static constexpr uint32_t OriginalSpiClockHz = 20 * 1000 * 1000;
 
     explicit Display(spi_inst_t* spi = spi0);
 
@@ -61,6 +62,8 @@ public:
     uint16_t width() const;
     uint16_t height() const;
 
+    void setSpiClockHz(uint32_t spi_clock_hz);
+    uint32_t spiClockHz() const;
     void setTargetFps(uint32_t target_fps);
     uint32_t targetFps() const;
     uint32_t targetFrameUs() const;
@@ -131,6 +134,7 @@ private:
 
     spi_inst_t* spi_;
     bool initialized_;
+    uint32_t spi_clock_hz_;
     uint32_t target_fps_;
     uint32_t target_frame_us_;
     absolute_time_t frame_start_;

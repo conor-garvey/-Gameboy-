@@ -39,6 +39,7 @@ add_executable(PicoBoy
         src/audio_engine.cpp
         src/buttons.cpp
         src/main.cpp
+        src/noise_diagnostic_app.cpp
         src/display.cpp
         src/lsm6dsl.cpp
         src/menu_app.cpp

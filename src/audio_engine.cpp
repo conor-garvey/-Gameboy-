@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "audio.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
 #include "hardware/sync.h"
@@ -11,34 +12,42 @@ namespace picoboy {
 namespace {
 
 constexpr uint32_t sample_rate_hz = 22050;
-// With the Pico's default 125 MHz system clock, wrap=255 and clkdiv=1
-// yield a PWM carrier of about 488 kHz, well above the RC filter cutoff.
+// Match hello_pico.cpp: 125 MHz / 256 / 2 = about 244 kHz carrier,
+// still comfortably above a ~7 kHz RC low-pass cutoff.
 constexpr uint16_t pwm_wrap = 255;
+constexpr uint8_t pwm_divider_int = 2;
+constexpr uint8_t pwm_divider_frac = 0;
+constexpr uint16_t pwm_silence = 0;
 constexpr uint8_t pwm_midpoint = 128;
 constexpr uint32_t oscillator_phase_scale = 1u << 24;
+constexpr uint32_t fixed_point_scale = 1u << 16;
+// Play the imported PCM a bit slower than its original export rate so the
+// background theme feels less rushed on hardware.
+constexpr uint32_t background_music_sample_rate_hz = 9000;
+constexpr size_t background_music_sample_count = sizeof(audio) / sizeof(audio[0]);
 
 using Waveform = AudioEngine::Waveform;
 using ToneStep = AudioEngine::ToneStep;
 using SoundSequence = AudioEngine::SoundSequence;
 
 const ToneStep power_on_steps[] = {
-    {523, 659, 34, 0, 30, Waveform::Pulse25},
-    {784, 988, 40, 30, 24, Waveform::Pulse25},
-    {1047, 1568, 76, 24, 0, Waveform::Pulse50},
+    {523, 659, 34, 0, 96, Waveform::Pulse25},
+    {784, 988, 40, 96, 84, Waveform::Pulse25},
+    {1047, 1568, 76, 84, 0, Waveform::Pulse50},
 };
 
 const ToneStep menu_move_steps[] = {
-    {1319, 1047, 24, 18, 0, Waveform::Pulse25},
+    {1319, 1047, 24, 84, 0, Waveform::Pulse25},
 };
 
 const ToneStep coin_steps[] = {
-    {988, 1319, 20, 8, 24, Waveform::Pulse25},
-    {1568, 2093, 46, 24, 0, Waveform::Pulse12},
+    {988, 1319, 20, 36, 108, Waveform::Pulse25},
+    {1568, 2093, 46, 128, 0, Waveform::Pulse12},
 };
 
 const ToneStep enemy_stomp_steps[] = {
-    {960, 220, 18, 28, 8, Waveform::Noise},
-    {247, 165, 44, 20, 0, Waveform::Pulse50},
+    {960, 220, 18, 128, 52, Waveform::Noise},
+    {247, 165, 44, 96, 0, Waveform::Pulse50},
 };
 
 uint32_t phaseStepForFrequency(uint16_t frequency_hz) {
@@ -99,10 +108,10 @@ void AudioEngine::init(uint8_t pwm_pin) {
     pwm_slice_ = pwm_gpio_to_slice_num(pwm_pin_);
 
     pwm_config config = pwm_get_default_config();
-    pwm_config_set_clkdiv(&config, 1.0f);
+    pwm_config_set_clkdiv_int_frac4(&config, pwm_divider_int, pwm_divider_frac);
     pwm_config_set_wrap(&config, pwm_wrap);
     pwm_init(pwm_slice_, &config, false);
-    pwm_set_gpio_level(pwm_pin_, pwm_midpoint);
+    pwm_set_gpio_level(pwm_pin_, pwm_silence);
 
     if (!timer_running_) {
         add_repeating_timer_us(static_cast<int64_t>(-1000000 / static_cast<int32_t>(sample_rate_hz)),
@@ -114,13 +123,35 @@ void AudioEngine::init(uint8_t pwm_pin) {
     disableOutput();
 }
 
+void AudioEngine::startBackgroundMusic() {
+    if (!initialized_ || background_music_sample_count == 0) {
+        return;
+    }
+
+    const uint32_t interrupts = save_and_disable_interrupts();
+    music_data_ = audio;
+    music_sample_count_ = background_music_sample_count;
+    music_index_ = 0;
+    music_fraction_ = 0;
+    music_step_fp_ = static_cast<uint32_t>(
+        (static_cast<uint64_t>(background_music_sample_rate_hz) * fixed_point_scale) / sample_rate_hz);
+    if (music_step_fp_ == 0) {
+        music_step_fp_ = 1;
+    }
+    music_enabled_ = music_sample_count_ > 0;
+    restore_interrupts(interrupts);
+
+    if (music_enabled_ && volume_ > 0) {
+        enableOutput();
+    }
+}
+
 void AudioEngine::playEffect(SoundEffect effect) {
     if (!initialized_) {
         return;
     }
 
     if (volume_ == 0) {
-        stop();
         return;
     }
 
@@ -150,8 +181,14 @@ void AudioEngine::stop() {
     noise_phase_accumulator_ = 0;
     samples_in_step_ = 0;
     samples_remaining_in_step_ = 0;
-    smoothed_sample_ = 0;
+    smoothed_level_ = 0;
     noise_lfsr_ = 0x5A5Au;
+    music_data_ = nullptr;
+    music_sample_count_ = 0;
+    music_index_ = 0;
+    music_fraction_ = 0;
+    music_step_fp_ = 0;
+    music_enabled_ = false;
     restore_interrupts(interrupts);
 
     if (initialized_) {
@@ -162,7 +199,14 @@ void AudioEngine::stop() {
 void AudioEngine::setVolume(uint8_t volume) {
     volume_ = std::min<uint8_t>(volume, MaxVolume);
     if (volume_ == 0) {
-        stop();
+        if (initialized_) {
+            disableOutput();
+        }
+        return;
+    }
+
+    if (initialized_ && hasActivePlayback()) {
+        enableOutput();
     }
 }
 
@@ -177,7 +221,14 @@ void AudioEngine::changeVolume(int delta) {
 
     volume_ = static_cast<uint8_t>(next_volume);
     if (volume_ == 0) {
-        stop();
+        if (initialized_) {
+            disableOutput();
+        }
+        return;
+    }
+
+    if (initialized_ && hasActivePlayback()) {
+        enableOutput();
     }
 }
 
@@ -200,9 +251,7 @@ bool AudioEngine::timerCallback(repeating_timer_t* timer) {
     }
 
     pwm_set_gpio_level(self->pwm_pin_, self->nextPwmLevel());
-    if (self->active_steps_ == nullptr &&
-        self->samples_remaining_in_step_ == 0 &&
-        self->smoothed_sample_ == 0) {
+    if (!self->hasActivePlayback()) {
         self->disableOutput();
     }
     return true;
@@ -260,7 +309,7 @@ void AudioEngine::enableOutput() {
     }
 
     gpio_set_function(pwm_pin_, GPIO_FUNC_PWM);
-    pwm_set_gpio_level(pwm_pin_, pwm_midpoint);
+    pwm_set_gpio_level(pwm_pin_, pwm_silence);
     pwm_set_enabled(pwm_slice_, true);
     output_enabled_ = true;
     restore_interrupts(interrupts);
@@ -269,6 +318,7 @@ void AudioEngine::enableOutput() {
 void AudioEngine::disableOutput() {
     const uint32_t interrupts = save_and_disable_interrupts();
     output_enabled_ = false;
+    pwm_set_gpio_level(pwm_pin_, pwm_silence);
     pwm_set_enabled(pwm_slice_, false);
     gpio_set_function(pwm_pin_, GPIO_FUNC_SIO);
     gpio_set_dir(pwm_pin_, GPIO_OUT);
@@ -276,23 +326,29 @@ void AudioEngine::disableOutput() {
     restore_interrupts(interrupts);
 }
 
-uint8_t AudioEngine::nextPwmLevel() {
+bool AudioEngine::hasActivePlayback() const {
+    return (music_enabled_ && music_data_ != nullptr && music_sample_count_ > 0) ||
+           active_steps_ != nullptr ||
+           samples_remaining_in_step_ > 0 ||
+           smoothed_level_ != 0;
+}
+
+int16_t AudioEngine::nextEffectSample() {
     if (samples_remaining_in_step_ == 0) {
         advanceStep();
     }
 
-    if (samples_remaining_in_step_ == 0 || volume_ == 0) {
-        if (smoothed_sample_ == 0) {
-            return pwm_midpoint;
+    if (samples_remaining_in_step_ == 0) {
+        if (smoothed_level_ == 0) {
+            return 0;
         }
 
-        smoothed_sample_ = static_cast<int32_t>(smoothed_sample_ * 3 / 4);
-        if (smoothed_sample_ > -2 && smoothed_sample_ < 2) {
-            smoothed_sample_ = 0;
+        smoothed_level_ = static_cast<int32_t>(smoothed_level_ * 3 / 4);
+        if (smoothed_level_ > -2 && smoothed_level_ < 2) {
+            smoothed_level_ = 0;
         }
 
-        const int32_t quiet_level = std::clamp<int32_t>(static_cast<int32_t>(pwm_midpoint) + smoothed_sample_, 0, pwm_wrap);
-        return static_cast<uint8_t>(quiet_level);
+        return static_cast<int16_t>(std::clamp<int32_t>(smoothed_level_, -127, 127));
     }
 
     const uint32_t progress = samples_in_step_ - samples_remaining_in_step_;
@@ -303,12 +359,11 @@ uint8_t AudioEngine::nextPwmLevel() {
     --samples_remaining_in_step_;
 
     if (amplitude == 0 || phase_step == 0) {
-        smoothed_sample_ = static_cast<int32_t>(smoothed_sample_ * 3 / 4);
-        if (smoothed_sample_ > -2 && smoothed_sample_ < 2) {
-            smoothed_sample_ = 0;
+        smoothed_level_ = static_cast<int32_t>(smoothed_level_ * 3 / 4);
+        if (smoothed_level_ > -2 && smoothed_level_ < 2) {
+            smoothed_level_ = 0;
         }
-        const int32_t quiet_level = std::clamp<int32_t>(static_cast<int32_t>(pwm_midpoint) + smoothed_sample_, 0, pwm_wrap);
-        return static_cast<uint8_t>(quiet_level);
+        return static_cast<int16_t>(std::clamp<int32_t>(smoothed_level_, -127, 127));
     }
 
     phase_accumulator_ += phase_step;
@@ -341,11 +396,50 @@ uint8_t AudioEngine::nextPwmLevel() {
         break;
     }
 
-    int32_t sample = wave_value * static_cast<int32_t>(amplitude) / 128;
-    sample = sample * static_cast<int32_t>(volume_) / static_cast<int32_t>(MaxVolume);
-    smoothed_sample_ += (sample - smoothed_sample_) / 3;
-    const int32_t level = std::clamp<int32_t>(static_cast<int32_t>(pwm_midpoint) + smoothed_sample_, 0, pwm_wrap);
-    return static_cast<uint8_t>(level);
+    const int32_t target_sample = wave_value * static_cast<int32_t>(amplitude) / 128;
+    smoothed_level_ += (target_sample - smoothed_level_) / 3;
+    return static_cast<int16_t>(std::clamp<int32_t>(smoothed_level_, -127, 127));
+}
+
+int16_t AudioEngine::nextMusicSample() {
+    if (!music_enabled_ || music_data_ == nullptr || music_sample_count_ == 0) {
+        return 0;
+    }
+
+    const uint8_t sample = music_data_[music_index_];
+
+    music_fraction_ += music_step_fp_;
+    music_index_ += (music_fraction_ >> 16);
+    music_fraction_ &= (fixed_point_scale - 1);
+
+    while (music_index_ >= music_sample_count_) {
+        music_index_ -= static_cast<uint32_t>(music_sample_count_);
+    }
+
+    return static_cast<int16_t>(static_cast<int16_t>(sample) - static_cast<int16_t>(pwm_midpoint));
+}
+
+uint8_t AudioEngine::nextPwmLevel() {
+    if (volume_ == 0) {
+        return pwm_silence;
+    }
+
+    const int16_t effect_sample = nextEffectSample();
+    const int16_t music_sample = nextMusicSample();
+
+    if (music_sample == 0 &&
+        effect_sample == 0 &&
+        !music_enabled_ &&
+        active_steps_ == nullptr &&
+        samples_remaining_in_step_ == 0 &&
+        smoothed_level_ == 0) {
+        return pwm_silence;
+    }
+
+    int32_t mixed_sample = static_cast<int32_t>(music_sample) + static_cast<int32_t>(effect_sample);
+    mixed_sample = mixed_sample * static_cast<int32_t>(volume_) / static_cast<int32_t>(MaxVolume);
+    mixed_sample = std::clamp<int32_t>(mixed_sample, -128, 127);
+    return static_cast<uint8_t>(mixed_sample + static_cast<int32_t>(pwm_midpoint));
 }
 
 }  // namespace picoboy

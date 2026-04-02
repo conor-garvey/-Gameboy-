@@ -10,6 +10,8 @@ namespace picoboy {
 namespace {
 
 constexpr uint32_t boot_duration_ms = 2200;
+constexpr uint32_t quiet_target_fps = 30;
+constexpr uint32_t original_target_fps = 60;
 
 Display::Color backgroundTop() {
     return Display::rgb565(10, 16, 40);
@@ -75,15 +77,20 @@ MenuApp::MenuApp(Display& display, Lsm6dsl& imu)
       selected_profile_entry_(0),
       active_profile_index_(-1),
       selected_game_index_(0),
+      selected_settings_item_(0),
+      display_mode_(DisplayMode::Quiet),
       pending_delete_index_(-1),
       notice_until_(get_absolute_time()),
       notice_text_{},
       plumber_man_(audio_),
-      sky_dodger_(imu_, audio_) {}
+      sky_dodger_(imu_, audio_),
+      noise_diagnostic_(display_, imu_, audio_) {}
 
 void MenuApp::init() {
     audio_.init();
+    applyDisplayMode(display_mode_);
     audio_.playEffect(SoundEffect::PowerOn);
+    audio_.startBackgroundMusic();
     buttons_.init();
     boot_started_ = get_absolute_time();
     notice_text_[0] = '\0';
@@ -113,6 +120,20 @@ void MenuApp::update() {
 
     case Screen::GameSelect:
         updateGameSelect();
+        break;
+
+    case Screen::Settings:
+        updateSettings();
+        break;
+
+    case Screen::NoiseDiagnostic:
+        noise_diagnostic_.update();
+        if (noise_diagnostic_.exitRequested()) {
+            audio_.startBackgroundMusic();
+            display_.backlightOn();
+            screen_ = Screen::Settings;
+            setNotice("BACK TO SETTINGS", 900);
+        }
         break;
 
     case Screen::PlumberMan:
@@ -149,6 +170,14 @@ void MenuApp::render() {
 
     case Screen::GameSelect:
         renderGameSelect();
+        break;
+
+    case Screen::Settings:
+        renderSettings();
+        break;
+
+    case Screen::NoiseDiagnostic:
+        noise_diagnostic_.render();
         break;
 
     case Screen::PlumberMan:
@@ -255,7 +284,7 @@ void MenuApp::updateGameSelect() {
         audio_.playEffect(SoundEffect::MenuMove);
     }
 
-    if (buttons_.pressed(ButtonId::Down) && selected_game_index_ < 1) {
+    if (buttons_.pressed(ButtonId::Down) && selected_game_index_ < 2) {
         ++selected_game_index_;
         audio_.playEffect(SoundEffect::MenuMove);
     }
@@ -283,15 +312,63 @@ void MenuApp::updateGameSelect() {
             return;
         }
 
-        if (!imu_.ready()) {
-            setNotice("IMU NOT FOUND", 1200);
+        if (selected_game_index_ == 1) {
+            if (!imu_.ready()) {
+                setNotice("IMU NOT FOUND", 1200);
+                return;
+            }
+
+            sky_dodger_.setAvatar(sanitizeAvatar(profile->avatar));
+            audio_.playEffect(SoundEffect::MenuMove);
+            sky_dodger_.enter(display_);
+            screen_ = Screen::SkyDodger;
             return;
         }
 
-        sky_dodger_.setAvatar(sanitizeAvatar(profile->avatar));
         audio_.playEffect(SoundEffect::MenuMove);
-        sky_dodger_.enter(display_);
-        screen_ = Screen::SkyDodger;
+        selected_settings_item_ = 0;
+        screen_ = Screen::Settings;
+        setNotice("SYSTEM SETTINGS", 1200);
+    }
+}
+
+void MenuApp::updateSettings() {
+    constexpr int settings_item_count = 2;
+
+    if (buttons_.pressed(ButtonId::Up) && selected_settings_item_ > 0) {
+        --selected_settings_item_;
+        audio_.playEffect(SoundEffect::MenuMove);
+    }
+
+    if (buttons_.pressed(ButtonId::Down) && selected_settings_item_ < settings_item_count - 1) {
+        ++selected_settings_item_;
+        audio_.playEffect(SoundEffect::MenuMove);
+    }
+
+    if (buttons_.pressed(ButtonId::B) || buttons_.pressed(ButtonId::Select)) {
+        audio_.playEffect(SoundEffect::MenuMove);
+        screen_ = Screen::GameSelect;
+        setNotice("BACK TO GAMES", 900);
+        return;
+    }
+
+    if (selected_settings_item_ == 0) {
+        if (buttons_.pressed(ButtonId::Left) || buttons_.pressed(ButtonId::Right) ||
+            buttons_.pressed(ButtonId::A) || buttons_.pressed(ButtonId::Start)) {
+            display_mode_ = display_mode_ == DisplayMode::Quiet
+                ? DisplayMode::Original
+                : DisplayMode::Quiet;
+            applyDisplayMode(display_mode_);
+            audio_.playEffect(SoundEffect::MenuMove);
+            setNotice(display_mode_ == DisplayMode::Quiet ? "QUIET DISPLAY MODE" : "ORIGINAL DISPLAY MODE", 1200);
+        }
+        return;
+    }
+
+    if (buttons_.pressed(ButtonId::A) || buttons_.pressed(ButtonId::Start)) {
+        audio_.playEffect(SoundEffect::MenuMove);
+        noise_diagnostic_.init();
+        screen_ = Screen::NoiseDiagnostic;
     }
 }
 
@@ -439,11 +516,16 @@ void MenuApp::renderGameSelect() {
             std::snprintf(line_one, sizeof(line_one), "COINS %lu",
                           static_cast<unsigned long>(profile->stats.plumber_total_coins));
             formatBestTime(line_two, sizeof(line_two), profile->stats.plumber_best_time_ms);
-        } else {
+        } else if (selected_game_index_ == 1) {
             std::snprintf(line_one, sizeof(line_one), "SKY BEST %lu",
                           static_cast<unsigned long>(profile->stats.sky_best_distance));
             std::snprintf(line_two, sizeof(line_two), "%s",
                           imu_.ready() ? "TILT TO DODGE" : "IMU REQUIRED");
+        } else {
+            std::snprintf(line_one, sizeof(line_one), "DISPLAY %s", displayModeName());
+            std::snprintf(line_two, sizeof(line_two), "SPI %luM  FPS %lu",
+                          static_cast<unsigned long>(display_.spiClockHz() / 1000000u),
+                          static_cast<unsigned long>(display_.targetFps()));
         }
 
         display_.drawText(62, 74, line_one, Display::rgb565(255, 255, 255), 1);
@@ -451,21 +533,80 @@ void MenuApp::renderGameSelect() {
     }
 
     if (notice_text_[0] != '\0' && !timeReached(notice_until_)) {
-        drawCenteredText(110, notice_text_.data(), Display::rgb565(255, 220, 140), 1);
+        drawCenteredText(96, notice_text_.data(), Display::rgb565(255, 220, 140), 1);
     } else if (selected_game_index_ == 0) {
-        drawCenteredText(110, "COLLECT COINS, CHASE A FAST TIME", Display::rgb565(140, 220, 180), 1);
-    } else if (imu_.ready()) {
-        drawCenteredText(110, "DODGE BIRDS AND SILLY BALLOONS", Display::rgb565(140, 220, 180), 1);
+        drawCenteredText(96, "COLLECT COINS, CHASE A FAST TIME", Display::rgb565(140, 220, 180), 1);
+    } else if (selected_game_index_ == 1 && imu_.ready()) {
+        drawCenteredText(96, "DODGE BIRDS AND SILLY BALLOONS", Display::rgb565(140, 220, 180), 1);
+    } else if (selected_game_index_ == 1) {
+        drawCenteredText(96, "IMU REQUIRED FOR SKY DODGER", Display::rgb565(140, 180, 220), 1);
     } else {
-        drawCenteredText(110, "IMU REQUIRED FOR SKY DODGER", Display::rgb565(140, 180, 220), 1);
+        drawCenteredText(96, "SET DISPLAY SPEED AND RUN NOISE TESTS", Display::rgb565(140, 220, 180), 1);
     }
 
-    drawMenuItem(128, "PLUMBER MAN", selected_game_index_ == 0, Display::rgb565(255, 255, 255));
-    drawMenuItem(162, "SKY DODGER", selected_game_index_ == 1, Display::rgb565(255, 255, 255));
+    drawMenuItem(110, "PLUMBER MAN", selected_game_index_ == 0, Display::rgb565(255, 255, 255));
+    drawMenuItem(140, "SKY DODGER", selected_game_index_ == 1, Display::rgb565(255, 255, 255));
+    drawMenuItem(170, "SETTINGS", selected_game_index_ == 2, Display::rgb565(255, 255, 255));
 
-    display_.drawText(18, static_cast<int16_t>(screen_height - 24), "A START = PLAY", Display::rgb565(200, 200, 200), 1);
+    display_.drawText(18, static_cast<int16_t>(screen_height - 24),
+                      selected_game_index_ == 2 ? "A START = OPEN" : "A START = PLAY",
+                      Display::rgb565(200, 200, 200), 1);
     display_.drawText(18, static_cast<int16_t>(screen_height - 12), "B SELECT = PROFILES", Display::rgb565(200, 200, 200), 1);
 
+    display_.present();
+}
+
+void MenuApp::renderSettings() {
+    const int16_t screen_width = static_cast<int16_t>(display_.width());
+
+    display_.beginFrame(backgroundBottom());
+    display_.fillRect(0, 0, screen_width, 30, backgroundTop());
+    drawCenteredText(8, "SETTINGS", Display::rgb565(255, 255, 255), 2);
+
+    const int16_t item_x = 18;
+    const int16_t item_width = static_cast<int16_t>(screen_width - 36);
+    const int16_t first_y = 52;
+    const int16_t gap = 38;
+
+    for (int item = 0; item < 2; ++item) {
+        const int16_t y = static_cast<int16_t>(first_y + item * gap);
+        const bool selected = selected_settings_item_ == item;
+        const Display::Color fill = selected ? selectedColor() : panelColor();
+        const Display::Color border = selected ? accentColor() : Display::rgb565(70, 90, 130);
+        display_.fillRect(item_x, y, item_width, 28, fill);
+        display_.drawRect(item_x, y, item_width, 28, border);
+
+        if (item == 0) {
+            display_.drawText(static_cast<int16_t>(item_x + 12), static_cast<int16_t>(y + 9),
+                              "DISPLAY MODE", Display::rgb565(255, 255, 255), 1);
+            const char* mode_text = displayModeName();
+            const int16_t mode_x = static_cast<int16_t>(screen_width - display_.measureTextWidth(mode_text, 1) - 30);
+            display_.drawText(mode_x, static_cast<int16_t>(y + 9), mode_text, accentColor(), 1);
+        } else {
+            display_.drawText(static_cast<int16_t>(item_x + 12), static_cast<int16_t>(y + 9),
+                              "NOISE DIAGNOSTIC", Display::rgb565(255, 255, 255), 1);
+            display_.drawText(static_cast<int16_t>(screen_width - 54), static_cast<int16_t>(y + 9),
+                              "RUN", accentColor(), 1);
+        }
+    }
+
+    char config_text[40];
+    std::snprintf(config_text, sizeof(config_text), "SPI %lu MHz   FPS %lu",
+                  static_cast<unsigned long>(display_.spiClockHz() / 1000000u),
+                  static_cast<unsigned long>(display_.targetFps()));
+    drawCenteredText(138, config_text, Display::rgb565(160, 220, 255), 1);
+    drawCenteredText(154, "QUIET = 10MHZ / 30FPS", Display::rgb565(220, 220, 220), 1);
+    drawCenteredText(166, "ORIGINAL = 20MHZ / 60FPS", Display::rgb565(220, 220, 220), 1);
+
+    if (notice_text_[0] != '\0' && !timeReached(notice_until_)) {
+        drawCenteredText(184, notice_text_.data(), Display::rgb565(255, 220, 140), 1);
+    } else if (selected_settings_item_ == 0) {
+        drawCenteredText(184, "LEFT/RIGHT/A TO SWITCH DISPLAY MODE", Display::rgb565(255, 220, 140), 1);
+    } else {
+        drawCenteredText(184, "RUN THE DIAGNOSTIC LISTEN TEST", Display::rgb565(255, 220, 140), 1);
+    }
+
+    drawCenteredText(204, "B OR SELECT = BACK", Display::rgb565(200, 200, 200), 1);
     display_.present();
 }
 
@@ -737,6 +878,21 @@ const char* MenuApp::selectedProfileName() const {
     }
 
     return profile->name;
+}
+
+void MenuApp::applyDisplayMode(DisplayMode mode) {
+    display_mode_ = mode;
+    if (display_mode_ == DisplayMode::Quiet) {
+        display_.setSpiClockHz(Display::SpiClockHz);
+        display_.setTargetFps(quiet_target_fps);
+    } else {
+        display_.setSpiClockHz(Display::OriginalSpiClockHz);
+        display_.setTargetFps(original_target_fps);
+    }
+}
+
+const char* MenuApp::displayModeName() const {
+    return display_mode_ == DisplayMode::Quiet ? "QUIET" : "ORIGINAL";
 }
 
 }  // namespace picoboy

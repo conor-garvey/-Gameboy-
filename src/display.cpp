@@ -160,8 +160,9 @@ const uint8_t* glyphForCharacter(char character) {
 Display::Display(spi_inst_t* spi)
     : spi_(spi),
       initialized_(false),
-      target_fps_(60),
-      target_frame_us_(microseconds_per_second / 60),
+      spi_clock_hz_(SpiClockHz),
+      target_fps_(30),
+      target_frame_us_(microseconds_per_second / 30),
       frame_start_(get_absolute_time()),
       rotation_(Rotation::Landscape90),
       physical_width_(DefaultWidth),
@@ -178,7 +179,7 @@ Display::Display(spi_inst_t* spi)
       strip_buffer_{} {}
 
 void Display::init() {
-    spi_init(spi_, SpiClockHz);
+    spi_init(spi_, spi_clock_hz_);
     spi_set_format(spi_, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
 
     gpio_set_function(PinSck, GPIO_FUNC_SPI);
@@ -377,6 +378,21 @@ uint16_t Display::width() const {
 
 uint16_t Display::height() const {
     return height_;
+}
+
+void Display::setSpiClockHz(uint32_t spi_clock_hz) {
+    if (spi_clock_hz == 0) {
+        spi_clock_hz = 1;
+    }
+
+    spi_clock_hz_ = spi_clock_hz;
+    if (initialized_) {
+        spi_set_baudrate(spi_, spi_clock_hz_);
+    }
+}
+
+uint32_t Display::spiClockHz() const {
+    return spi_clock_hz_;
 }
 
 void Display::beginFrame(Color background_color) {

@@ -43,6 +43,7 @@ public:
     AudioEngine();
 
     void init(uint8_t pwm_pin = DefaultPwmPin);
+    void startBackgroundMusic();
     void playEffect(SoundEffect effect);
     void stop();
 
@@ -57,12 +58,15 @@ private:
     SoundSequence sequenceForEffect(SoundEffect effect) const;
     void enableOutput();
     void disableOutput();
+    bool hasActivePlayback() const;
+    int16_t nextEffectSample();
+    int16_t nextMusicSample();
     uint8_t nextPwmLevel();
 
     bool initialized_ = false;
     uint8_t pwm_pin_ = DefaultPwmPin;
     uint8_t pwm_slice_ = 0;
-    uint8_t volume_ = 6;
+    uint8_t volume_ = 8;
     bool output_enabled_ = false;
     bool timer_running_ = false;
     repeating_timer_t timer_{};
@@ -78,8 +82,14 @@ private:
     uint32_t current_end_phase_step_ = 0;
     uint32_t samples_in_step_ = 0;
     uint32_t samples_remaining_in_step_ = 0;
-    int32_t smoothed_sample_ = 0;
+    int32_t smoothed_level_ = 0;
     uint16_t noise_lfsr_ = 0x5A5Au;
+    const uint8_t* music_data_ = nullptr;
+    size_t music_sample_count_ = 0;
+    uint32_t music_index_ = 0;
+    uint32_t music_fraction_ = 0;
+    uint32_t music_step_fp_ = 0;
+    bool music_enabled_ = false;
 };
 
 }  // namespace picoboy

@@ -16,7 +16,7 @@ int main()
     display.setRotation(picoboy::Display::Rotation::Landscape90);
     display.setViewport(260, 218);
     display.init();
-    display.setTargetFps(60);
+    display.setTargetFps(30);
 
     // Change these fields if your LSM6DSL is wired to different I2C pins.
     picoboy::Lsm6dsl::Config imu_config;

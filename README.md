@@ -63,6 +63,21 @@ You need:
 
 The easiest setup on Windows is usually the Raspberry Pi Pico VS Code extension, because it installs and manages the Pico SDK and toolchain for you.
 
+## Fresh Windows Setup
+
+If your laptop is starting from nothing, this is the easiest path:
+
+1. Install [Visual Studio Code](https://code.visualstudio.com/).
+2. Open VS Code and install the `Raspberry Pi Pico` extension published by `Raspberry Pi`.
+3. Get this project onto your laptop:
+   - install Git and clone it, or
+   - download the repository ZIP from GitHub and extract it
+4. In VS Code, open the `PicoBoy` project folder itself.
+5. Let the Pico extension install the Pico SDK, toolchain, CMake, and Ninja if it prompts you.
+6. Restart VS Code once that setup finishes.
+
+After that, open a PowerShell terminal in the project folder and use the build commands below.
+
 ## Build Setup
 
 ### PowerShell
@@ -74,7 +89,7 @@ cmake -S . -B build -G Ninja -DPICO_BOARD=pico_w
 cmake --build build
 ```
 
-If your Pico SDK is not already set up by the VS Code extension, set `PICO_SDK_PATH` first:
+If you cloned or downloaded the repo onto a machine that does not already have the Pico SDK configured by the VS Code extension, set `PICO_SDK_PATH` first:
 
 ```powershell
 $env:PICO_SDK_PATH="C:\path\to\pico-sdk"
@@ -88,6 +103,17 @@ If you want to wipe the existing build folder and configure again:
 
 ```powershell
 Remove-Item -Recurse -Force build
+cmake -S . -B build -G Ninja -DPICO_BOARD=pico_w
+cmake --build build
+```
+
+### Git Clone Example
+
+If you are using Git on a new machine:
+
+```powershell
+git clone https://github.com/YOUR-USERNAME/PicoBoy.git
+cd PicoBoy
 cmake -S . -B build -G Ninja -DPICO_BOARD=pico_w
 cmake --build build
 ```
@@ -113,7 +139,7 @@ Current defaults:
 
 - rotation: `Landscape90`
 - viewport: `260 x 218`
-- target FPS: `60`
+- target FPS: `30`
 
 That section currently looks like this:
 
@@ -121,7 +147,7 @@ That section currently looks like this:
 display.setRotation(picoboy::Display::Rotation::Landscape90);
 display.setViewport(260, 218);
 display.init();
-display.setTargetFps(60);
+display.setTargetFps(30);
 ```
 
 To use the full landscape screen again:
@@ -138,23 +164,49 @@ display.setViewport(320, 240);
 - `A` or `START` confirm
 - `B` or `SELECT` go back
 
+### Settings
+
+- open from the `SETTINGS` item in the game-select screen
+- switch `DISPLAY MODE` between `QUIET` and `ORIGINAL`
+- run `NOISE DIAGNOSTIC` from the settings screen
+
 ### Plumber Man
 
 - `LEFT` / `RIGHT` move
 - `A` or `UP` jump
 - `B` run
 - `START` restart
-- `SELECT` exit
+- `SELECT` pause
+- pause menu: return to menu or change volume
 
 ### Sky Dodger
 
 - `A` or `START` steps through calibration
 - tilt the device to steer
 - `START` restart after crashing
-- `SELECT` or `B` exit
+- `SELECT` pause
+- pause menu: return to menu or change volume
+
+## Noise Diagnostic
+
+Open the `SETTINGS` item from the game-select screen, then choose `NOISE DIAGNOSTIC`.
+
+Inside the diagnostic:
+
+- `UP` / `DOWN` select an item
+- `A`, `LEFT`, or `RIGHT` toggle the selected item
+- `START` exits back to the normal menu
+
+The diagnostic keeps the audio pin forced low and lets you toggle:
+
+- `SCREEN LOAD` to turn continuous display SPI updates on or off
+- `BACKLIGHT` to turn the display backlight on or off
+- `IMU POLL` to turn repeated IMU reads on or off
 
 ## Notes
 
 - The display renderer uses strip buffers instead of a full framebuffer to keep RAM usage reasonable on the Pico W.
+- The default display SPI clock is reduced to `10 MHz` and the default frame rate is `30 FPS` to cut display-related audio noise.
+- The settings screen lets you switch back to the original fast display mode: `20 MHz` SPI and `60 FPS`.
 - `Sky Dodger` calibrates at startup and auto-detects the steering axis.
 - The codebase is still growing, so the API and game structure may continue to change as PicoBoy develops.
