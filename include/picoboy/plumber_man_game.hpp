@@ -30,6 +30,11 @@ private:
         Volume,
     };
 
+    enum class LoseSelection : uint8_t {
+        Retry,
+        ReturnToMenu,
+    };
+
     struct Enemy {
         int16_t x = 0;
         int16_t y = 0;
@@ -48,12 +53,15 @@ private:
     static constexpr int8_t JumpVelocity = -12;
 
     void resetLevel();
+    void triggerLoss();
     void resetEnemies();
     void collectCoins();
     bool updateEnemies();
     bool handleEnemyCollision(Enemy& enemy);
+    void updateLoseMenu(const Buttons& buttons);
     void updatePauseMenu(const Buttons& buttons);
     void adjustVolume(int delta);
+    void renderLoseOverlay(Display& display) const;
     void renderPauseOverlay(Display& display) const;
     void movePlayerX(int16_t delta);
     void movePlayerY(int16_t delta);
@@ -65,14 +73,19 @@ private:
     int16_t player_y_ = 0;
     int8_t velocity_y_ = 0;
     bool on_ground_ = false;
+    bool lost_ = false;
     bool won_ = false;
     bool exit_requested_ = false;
     bool paused_ = false;
     bool editing_volume_ = false;
+    bool facing_left_ = false;
+    bool moving_horizontally_ = false;
     uint8_t coins_collected_ = 0;
     AvatarId avatar_ = AvatarId::Hero;
     PauseSelection pause_selection_ = PauseSelection::ReturnToMenu;
+    LoseSelection lose_selection_ = LoseSelection::Retry;
     absolute_time_t run_started_{};
+    absolute_time_t loss_input_unlock_at_{};
     bool completion_report_pending_ = false;
     uint32_t pending_completion_time_ms_ = 0;
     uint8_t pending_completion_coins_ = 0;

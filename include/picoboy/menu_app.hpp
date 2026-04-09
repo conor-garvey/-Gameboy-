@@ -99,6 +99,7 @@ private:
     int selected_settings_item_;
     DisplayMode display_mode_;
     bool audio_enabled_;
+    bool boot_sound_played_ = false;
     int pending_delete_index_;
     absolute_time_t notice_until_;
     std::array<char, NoticeTextSize> notice_text_;

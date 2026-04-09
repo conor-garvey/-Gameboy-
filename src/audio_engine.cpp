@@ -2,7 +2,11 @@
 
 #include <algorithm>
 
-#include "audio.h"
+#include "Death_sound_effect.h"
+#include "Menu_audio.h"
+#include "Pico_Boy_startup_screen.h"
+#include "plumber_man_audio.h"
+#include "sky_dodger_audio.h"
 #include "hardware/gpio.h"
 #include "hardware/pwm.h"
 #include "hardware/sync.h"
@@ -21,10 +25,18 @@ constexpr uint16_t pwm_silence = 0;
 constexpr uint8_t pwm_midpoint = 128;
 constexpr uint32_t oscillator_phase_scale = 1u << 24;
 constexpr uint32_t fixed_point_scale = 1u << 16;
-// Play the imported PCM a bit slower than its original export rate so the
-// background theme feels less rushed on hardware.
-constexpr uint32_t background_music_sample_rate_hz = 9000;
-constexpr size_t background_music_sample_count = sizeof(audio) / sizeof(audio[0]);
+// Menu music is generated as 22.05 kHz unsigned PCM.
+constexpr uint32_t menu_music_sample_rate_hz = 22050;
+constexpr size_t menu_music_sample_count = sizeof(menu_audio) / sizeof(menu_audio[0]);
+constexpr uint32_t plumber_man_music_sample_rate_hz = 9000;
+constexpr size_t plumber_man_music_sample_count = sizeof(audio) / sizeof(audio[0]);
+constexpr uint32_t sky_dodger_music_sample_rate_hz = 22050;
+constexpr size_t sky_dodger_music_sample_count = sizeof(sky_dodger_audio) / sizeof(sky_dodger_audio[0]);
+constexpr uint32_t startup_screen_sample_rate_hz = 22050;
+constexpr size_t startup_screen_sample_count = sizeof(pico_boy_startup_screen) / sizeof(pico_boy_startup_screen[0]);
+constexpr uint32_t death_effect_sample_rate_hz = 22050;
+constexpr size_t death_effect_sample_count = sizeof(death_sound_effect) / sizeof(death_sound_effect[0]);
+constexpr uint32_t death_music_resume_delay_ms = 700;
 
 using Waveform = AudioEngine::Waveform;
 using ToneStep = AudioEngine::ToneStep;
@@ -123,22 +135,53 @@ void AudioEngine::init(uint8_t pwm_pin) {
     disableOutput();
 }
 
-void AudioEngine::startBackgroundMusic() {
-    if (!initialized_ || !enabled_ || background_music_sample_count == 0) {
+void AudioEngine::startBackgroundMusic(MusicTrack track) {
+    if (!initialized_ || !enabled_) {
+        return;
+    }
+
+    const uint8_t* music_data = nullptr;
+    size_t music_sample_count = 0;
+    uint32_t music_sample_rate_hz = 0;
+
+    switch (track) {
+    case MusicTrack::Menu:
+        music_data = menu_audio;
+        music_sample_count = menu_music_sample_count;
+        music_sample_rate_hz = menu_music_sample_rate_hz;
+        break;
+
+    case MusicTrack::PlumberMan:
+        music_data = audio;
+        music_sample_count = plumber_man_music_sample_count;
+        music_sample_rate_hz = plumber_man_music_sample_rate_hz;
+        break;
+
+    case MusicTrack::SkyDodger:
+        music_data = sky_dodger_audio;
+        music_sample_count = sky_dodger_music_sample_count;
+        music_sample_rate_hz = sky_dodger_music_sample_rate_hz;
+        break;
+    }
+
+    if (music_data == nullptr || music_sample_count == 0 || music_sample_rate_hz == 0) {
         return;
     }
 
     const uint32_t interrupts = save_and_disable_interrupts();
-    music_data_ = audio;
-    music_sample_count_ = background_music_sample_count;
+    music_data_ = music_data;
+    music_sample_count_ = music_sample_count;
     music_index_ = 0;
     music_fraction_ = 0;
     music_step_fp_ = static_cast<uint32_t>(
-        (static_cast<uint64_t>(background_music_sample_rate_hz) * fixed_point_scale) / sample_rate_hz);
+        (static_cast<uint64_t>(music_sample_rate_hz) * fixed_point_scale) / sample_rate_hz);
     if (music_step_fp_ == 0) {
         music_step_fp_ = 1;
     }
     music_enabled_ = music_sample_count_ > 0;
+    music_paused_for_effect_ = false;
+    music_resume_delay_samples_ = 0;
+    resume_music_after_effect_ = false;
     restore_interrupts(interrupts);
 
     if (music_enabled_ && volume_ > 0) {
@@ -154,6 +197,9 @@ void AudioEngine::stopBackgroundMusic() {
     music_fraction_ = 0;
     music_step_fp_ = 0;
     music_enabled_ = false;
+    music_paused_for_effect_ = false;
+    music_resume_delay_samples_ = 0;
+    resume_music_after_effect_ = false;
     restore_interrupts(interrupts);
 
     if (initialized_ && !hasActivePlayback()) {
@@ -170,6 +216,18 @@ void AudioEngine::playEffect(SoundEffect effect) {
         return;
     }
 
+    if (effect == SoundEffect::StartupScreen) {
+        music_resume_delay_samples_ = 0;
+        startPcmEffect(pico_boy_startup_screen, startup_screen_sample_count, startup_screen_sample_rate_hz, false);
+        return;
+    }
+
+    if (effect == SoundEffect::Death) {
+        music_resume_delay_samples_ = sample_rate_hz * death_music_resume_delay_ms / 1000u;
+        startPcmEffect(death_sound_effect, death_effect_sample_count, death_effect_sample_rate_hz, true);
+        return;
+    }
+
     const SoundSequence sequence = sequenceForEffect(effect);
     const uint32_t interrupts = save_and_disable_interrupts();
     active_steps_ = sequence.steps;
@@ -178,6 +236,14 @@ void AudioEngine::playEffect(SoundEffect effect) {
     phase_accumulator_ = 0;
     noise_phase_accumulator_ = 0;
     noise_lfsr_ = 0x5A5Au;
+    effect_pcm_data_ = nullptr;
+    effect_pcm_sample_count_ = 0;
+    effect_pcm_index_ = 0;
+    effect_pcm_fraction_ = 0;
+    effect_pcm_step_fp_ = 0;
+    music_paused_for_effect_ = false;
+    music_resume_delay_samples_ = 0;
+    resume_music_after_effect_ = false;
     advanceStep();
     restore_interrupts(interrupts);
     enableOutput();
@@ -204,6 +270,14 @@ void AudioEngine::stop() {
     music_fraction_ = 0;
     music_step_fp_ = 0;
     music_enabled_ = false;
+    music_paused_for_effect_ = false;
+    effect_pcm_data_ = nullptr;
+    effect_pcm_sample_count_ = 0;
+    effect_pcm_index_ = 0;
+    effect_pcm_fraction_ = 0;
+    effect_pcm_step_fp_ = 0;
+    music_resume_delay_samples_ = 0;
+    resume_music_after_effect_ = false;
     restore_interrupts(interrupts);
 
     if (initialized_) {
@@ -285,6 +359,44 @@ uint8_t AudioEngine::pwmPin() const {
     return pwm_pin_;
 }
 
+void AudioEngine::startPcmEffect(const uint8_t* data, size_t sample_count, uint32_t clip_sample_rate_hz, bool pause_music) {
+    if (data == nullptr || sample_count == 0 || clip_sample_rate_hz == 0) {
+        return;
+    }
+
+    const uint32_t interrupts = save_and_disable_interrupts();
+    active_steps_ = nullptr;
+    active_step_count_ = 0;
+    active_step_index_ = 0;
+    current_start_amplitude_ = 0;
+    current_end_amplitude_ = 0;
+    current_start_phase_step_ = 0;
+    current_end_phase_step_ = 0;
+    phase_accumulator_ = 0;
+    noise_phase_accumulator_ = 0;
+    samples_in_step_ = 0;
+    samples_remaining_in_step_ = 0;
+    smoothed_level_ = 0;
+
+    effect_pcm_data_ = data;
+    effect_pcm_sample_count_ = sample_count;
+    effect_pcm_index_ = 0;
+    effect_pcm_fraction_ = 0;
+    effect_pcm_step_fp_ = static_cast<uint32_t>(
+        (static_cast<uint64_t>(clip_sample_rate_hz) * fixed_point_scale) / sample_rate_hz);
+    if (effect_pcm_step_fp_ == 0) {
+        effect_pcm_step_fp_ = 1;
+    }
+
+    resume_music_after_effect_ = pause_music && music_enabled_ && music_data_ != nullptr && music_sample_count_ > 0;
+    music_paused_for_effect_ = resume_music_after_effect_;
+    if (!resume_music_after_effect_) {
+        music_resume_delay_samples_ = 0;
+    }
+    restore_interrupts(interrupts);
+    enableOutput();
+}
+
 bool AudioEngine::timerCallback(repeating_timer_t* timer) {
     AudioEngine* self = static_cast<AudioEngine*>(timer->user_data);
     if (self == nullptr || !self->initialized_) {
@@ -333,6 +445,9 @@ AudioEngine::SoundSequence AudioEngine::sequenceForEffect(SoundEffect effect) co
     case SoundEffect::PowerOn:
         return SoundSequence{power_on_steps, sizeof(power_on_steps) / sizeof(power_on_steps[0])};
 
+    case SoundEffect::StartupScreen:
+        return SoundSequence{};
+
     case SoundEffect::MenuMove:
         return SoundSequence{menu_move_steps, sizeof(menu_move_steps) / sizeof(menu_move_steps[0])};
 
@@ -341,6 +456,9 @@ AudioEngine::SoundSequence AudioEngine::sequenceForEffect(SoundEffect effect) co
 
     case SoundEffect::EnemyStomp:
         return SoundSequence{enemy_stomp_steps, sizeof(enemy_stomp_steps) / sizeof(enemy_stomp_steps[0])};
+
+    case SoundEffect::Death:
+        return SoundSequence{};
     }
 
     return SoundSequence{};
@@ -373,12 +491,45 @@ void AudioEngine::disableOutput() {
 
 bool AudioEngine::hasActivePlayback() const {
     return (music_enabled_ && music_data_ != nullptr && music_sample_count_ > 0) ||
+           (effect_pcm_data_ != nullptr && effect_pcm_sample_count_ > 0) ||
+           music_resume_delay_samples_ > 0 ||
            active_steps_ != nullptr ||
            samples_remaining_in_step_ > 0 ||
            smoothed_level_ != 0;
 }
 
 int16_t AudioEngine::nextEffectSample() {
+    if (effect_pcm_data_ == nullptr && resume_music_after_effect_ && music_resume_delay_samples_ > 0) {
+        --music_resume_delay_samples_;
+        if (music_resume_delay_samples_ == 0) {
+            music_paused_for_effect_ = false;
+            resume_music_after_effect_ = false;
+        }
+        return 0;
+    }
+
+    if (effect_pcm_data_ != nullptr && effect_pcm_sample_count_ > 0) {
+        const uint8_t sample = effect_pcm_data_[effect_pcm_index_];
+
+        effect_pcm_fraction_ += effect_pcm_step_fp_;
+        effect_pcm_index_ += (effect_pcm_fraction_ >> 16);
+        effect_pcm_fraction_ &= (fixed_point_scale - 1);
+
+        if (effect_pcm_index_ >= effect_pcm_sample_count_) {
+            effect_pcm_data_ = nullptr;
+            effect_pcm_sample_count_ = 0;
+            effect_pcm_index_ = 0;
+            effect_pcm_fraction_ = 0;
+            effect_pcm_step_fp_ = 0;
+            if (resume_music_after_effect_ && music_resume_delay_samples_ == 0) {
+                music_paused_for_effect_ = false;
+                resume_music_after_effect_ = false;
+            }
+        }
+
+        return static_cast<int16_t>(static_cast<int16_t>(sample) - static_cast<int16_t>(pwm_midpoint));
+    }
+
     if (samples_remaining_in_step_ == 0) {
         advanceStep();
     }
@@ -447,11 +598,12 @@ int16_t AudioEngine::nextEffectSample() {
 }
 
 int16_t AudioEngine::nextMusicSample() {
-    if (!music_enabled_ || music_data_ == nullptr || music_sample_count_ == 0) {
+    if (!music_enabled_ || music_paused_for_effect_ || music_data_ == nullptr || music_sample_count_ == 0) {
         return 0;
     }
 
-    const uint8_t sample = music_data_[music_index_];
+    const int16_t sample_value =
+        static_cast<int16_t>(music_data_[music_index_]) - static_cast<int16_t>(pwm_midpoint);
 
     music_fraction_ += music_step_fp_;
     music_index_ += (music_fraction_ >> 16);
@@ -461,7 +613,7 @@ int16_t AudioEngine::nextMusicSample() {
         music_index_ -= static_cast<uint32_t>(music_sample_count_);
     }
 
-    return static_cast<int16_t>(static_cast<int16_t>(sample) - static_cast<int16_t>(pwm_midpoint));
+    return sample_value;
 }
 
 uint8_t AudioEngine::nextPwmLevel() {
@@ -475,6 +627,8 @@ uint8_t AudioEngine::nextPwmLevel() {
     if (music_sample == 0 &&
         effect_sample == 0 &&
         !music_enabled_ &&
+        effect_pcm_data_ == nullptr &&
+        music_resume_delay_samples_ == 0 &&
         active_steps_ == nullptr &&
         samples_remaining_in_step_ == 0 &&
         smoothed_level_ == 0) {

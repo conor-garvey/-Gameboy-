@@ -169,6 +169,8 @@ Display::Display(spi_inst_t* spi)
       physical_height_(DefaultHeight),
       viewport_x_(0),
       viewport_y_(0),
+      viewport_offset_x_(0),
+      viewport_offset_y_(0),
       width_(DefaultWidth),
       height_(DefaultHeight),
       commands_{},
@@ -325,7 +327,7 @@ void Display::setRotation(Rotation rotation) {
         break;
 
     case Rotation::Landscape90:
-        madctl = static_cast<uint8_t>(madctl_mv | madctl_bgr);
+        madctl = static_cast<uint8_t>(madctl_mv | madctl_my | madctl_bgr);
         break;
 
     case Rotation::Portrait180:
@@ -361,6 +363,16 @@ void Display::setViewport(uint16_t width, uint16_t height) {
 
     width_ = width;
     height_ = height;
+    updateViewportOffsets();
+
+    if (initialized_) {
+        clearPhysicalScreen(rgb565(0, 0, 0));
+    }
+}
+
+void Display::setViewportOffset(int16_t offset_x, int16_t offset_y) {
+    viewport_offset_x_ = offset_x;
+    viewport_offset_y_ = offset_y;
     updateViewportOffsets();
 
     if (initialized_) {
@@ -689,8 +701,19 @@ void Display::updatePhysicalDimensions() {
 }
 
 void Display::updateViewportOffsets() {
-    viewport_x_ = static_cast<uint16_t>((physical_width_ - width_) / 2);
-    viewport_y_ = static_cast<uint16_t>((physical_height_ - height_) / 2);
+    int16_t center_x = static_cast<int16_t>((physical_width_ - width_) / 2);
+    int16_t center_y = static_cast<int16_t>((physical_height_ - height_) / 2);
+
+    viewport_x_ = static_cast<uint16_t>(std::max<int16_t>(0, center_x + viewport_offset_x_));
+    viewport_y_ = static_cast<uint16_t>(std::max<int16_t>(0, center_y + viewport_offset_y_));
+
+    // Ensure the viewport doesn't go off-screen
+    if (viewport_x_ + width_ > physical_width_) {
+        viewport_x_ = static_cast<uint16_t>(physical_width_ - width_);
+    }
+    if (viewport_y_ + height_ > physical_height_) {
+        viewport_y_ = static_cast<uint16_t>(physical_height_ - height_);
+    }
 }
 
 void Display::setPhysicalAddressWindow(uint16_t x, uint16_t y, uint16_t width, uint16_t height) {

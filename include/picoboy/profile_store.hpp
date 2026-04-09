@@ -9,7 +9,6 @@ namespace picoboy {
 enum class AvatarId : uint8_t {
     Hero = 0,
     Pac,
-    Stick,
     Count,
 };
 

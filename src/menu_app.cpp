@@ -9,7 +9,8 @@ namespace picoboy {
 
 namespace {
 
-constexpr uint32_t boot_duration_ms = 2200;
+constexpr uint32_t boot_sound_delay_ms = 2000;
+constexpr uint32_t boot_duration_ms = 4400;
 constexpr uint32_t quiet_target_fps = 30;
 constexpr uint32_t original_target_fps = 60;
 
@@ -39,6 +40,21 @@ Display::Color dangerColor() {
 
 bool timeReached(absolute_time_t deadline) {
     return absolute_time_diff_us(get_absolute_time(), deadline) <= 0;
+}
+
+void formatVolumeText(char* buffer, size_t buffer_size, uint8_t volume) {
+    if (buffer == nullptr || buffer_size == 0) {
+        return;
+    }
+
+    if (volume == 0) {
+        std::snprintf(buffer, buffer_size, "MUTE");
+        return;
+    }
+
+    std::snprintf(buffer, buffer_size, "%u/%u",
+                  static_cast<unsigned>(volume),
+                  static_cast<unsigned>(AudioEngine::MaxVolume));
 }
 
 AvatarId sanitizeAvatar(uint8_t avatar) {
@@ -78,8 +94,9 @@ MenuApp::MenuApp(Display& display, Lsm6dsl& imu)
       active_profile_index_(-1),
       selected_game_index_(0),
       selected_settings_item_(0),
-      display_mode_(DisplayMode::Quiet),
+      display_mode_(DisplayMode::Original),
       audio_enabled_(true),
+      boot_sound_played_(false),
       pending_delete_index_(-1),
       notice_until_(get_absolute_time()),
       notice_text_{},
@@ -93,6 +110,7 @@ void MenuApp::init() {
     applyDisplayMode(display_mode_);
     buttons_.init();
     boot_started_ = get_absolute_time();
+    boot_sound_played_ = false;
     notice_text_[0] = '\0';
     pending_delete_index_ = -1;
     active_profile_index_ = -1;
@@ -132,6 +150,9 @@ void MenuApp::update() {
             audio_.stop();
             display_.backlightOn();
             screen_ = Screen::Settings;
+            if (audio_enabled_) {
+                audio_.startBackgroundMusic();
+            }
             setNotice("BACK TO SETTINGS", 900);
         }
         break;
@@ -143,6 +164,9 @@ void MenuApp::update() {
             plumber_man_.clearExitRequest();
             audio_.stop();
             screen_ = Screen::GameSelect;
+            if (audio_enabled_) {
+                audio_.startBackgroundMusic();
+            }
             setNotice("BACK TO GAMES", 900);
         }
         break;
@@ -154,6 +178,9 @@ void MenuApp::update() {
             sky_dodger_.clearExitRequest();
             audio_.stop();
             screen_ = Screen::GameSelect;
+            if (audio_enabled_) {
+                audio_.startBackgroundMusic();
+            }
             setNotice("BACK TO GAMES", 900);
         }
         break;
@@ -194,10 +221,22 @@ void MenuApp::render() {
 
 void MenuApp::updateBoot() {
     const int64_t elapsed_ms = absolute_time_diff_us(boot_started_, get_absolute_time()) / 1000;
+    if (!boot_sound_played_ &&
+        elapsed_ms >= static_cast<int64_t>(boot_sound_delay_ms) &&
+        audio_enabled_) {
+        audio_.playEffect(SoundEffect::StartupScreen);
+        boot_sound_played_ = true;
+    }
 
-    if (elapsed_ms >= static_cast<int64_t>(boot_duration_ms) ||
+    const bool skip_requested =
         buttons_.pressed(ButtonId::A) ||
-        buttons_.pressed(ButtonId::Start)) {
+        buttons_.pressed(ButtonId::Start);
+
+    if (elapsed_ms >= static_cast<int64_t>(boot_duration_ms) || skip_requested) {
+        audio_.stop();
+        if (audio_enabled_) {
+            audio_.startBackgroundMusic();
+        }
         screen_ = Screen::ProfileSelect;
         selected_profile_entry_ = profileCount() > 0 ? 0 : createEntryIndex();
         setNotice("CHOOSE A PROFILE", 1200);
@@ -297,8 +336,10 @@ void MenuApp::updateGameSelect() {
         if (selected_game_index_ == 0) {
             plumber_man_.setAvatar(sanitizeAvatar(profile->avatar));
             audio_.stop();
-            audio_.startBackgroundMusic();
             plumber_man_.enter();
+            if (audio_enabled_) {
+                audio_.startBackgroundMusic(MusicTrack::PlumberMan);
+            }
             screen_ = Screen::PlumberMan;
             return;
         }
@@ -311,8 +352,10 @@ void MenuApp::updateGameSelect() {
 
             sky_dodger_.setAvatar(sanitizeAvatar(profile->avatar));
             audio_.stop();
-            audio_.startBackgroundMusic();
             sky_dodger_.enter(display_);
+            if (audio_enabled_) {
+                audio_.startBackgroundMusic(MusicTrack::SkyDodger);
+            }
             screen_ = Screen::SkyDodger;
             return;
         }
@@ -324,7 +367,7 @@ void MenuApp::updateGameSelect() {
 }
 
 void MenuApp::updateSettings() {
-    constexpr int settings_item_count = 3;
+    constexpr int settings_item_count = 4;
 
     if (buttons_.pressed(ButtonId::Up) && selected_settings_item_ > 0) {
         --selected_settings_item_;
@@ -353,10 +396,43 @@ void MenuApp::updateSettings() {
     }
 
     if (selected_settings_item_ == 1) {
+        bool volume_changed = false;
+
+        if (buttons_.pressed(ButtonId::Left)) {
+            audio_.changeVolume(-1);
+            volume_changed = true;
+        } else if (buttons_.pressed(ButtonId::Right)) {
+            audio_.changeVolume(1);
+            volume_changed = true;
+        } else if (buttons_.pressed(ButtonId::A) || buttons_.pressed(ButtonId::Start)) {
+            if (audio_.volume() == 0) {
+                audio_.setVolume(AudioEngine::DefaultVolume);
+            } else {
+                audio_.setVolume(0);
+            }
+            volume_changed = true;
+        }
+
+        if (volume_changed) {
+            char notice[24];
+            char volume_text[12];
+            formatVolumeText(volume_text, sizeof(volume_text), audio_.volume());
+            std::snprintf(notice, sizeof(notice), "VOLUME %s", volume_text);
+            setNotice(notice, 900);
+            audio_.playEffect(SoundEffect::MenuMove);
+        }
+
+        return;
+    }
+
+    if (selected_settings_item_ == 2) {
         if (buttons_.pressed(ButtonId::Left) || buttons_.pressed(ButtonId::Right) ||
             buttons_.pressed(ButtonId::A) || buttons_.pressed(ButtonId::Start)) {
             setAudioEnabled(!audio_enabled_);
-            setNotice(audio_enabled_ ? "GAME AUDIO ON" : "GAME AUDIO OFF", 1200);
+            if (audio_enabled_) {
+                audio_.startBackgroundMusic();
+            }
+            setNotice(audio_enabled_ ? "AUDIO ON" : "AUDIO OFF", 1200);
         }
         return;
     }
@@ -394,9 +470,11 @@ void MenuApp::updateSkyDodgerStats() {
     }
 
     uint32_t distance = 0;
-    if (!sky_dodger_.consumeFinishedRun(distance)) {
+    uint32_t coins_collected = 0;
+    if (!sky_dodger_.consumeFinishedRun(distance, coins_collected)) {
         return;
     }
+    (void)coins_collected;
 
     if (distance > profile->stats.sky_best_distance) {
         profile->stats.sky_best_distance = distance;
@@ -553,6 +631,7 @@ void MenuApp::renderGameSelect() {
 
 void MenuApp::renderSettings() {
     const int16_t screen_width = static_cast<int16_t>(display_.width());
+    const int16_t screen_height = static_cast<int16_t>(display_.height());
 
     display_.beginFrame(backgroundBottom());
     display_.fillRect(0, 0, screen_width, 30, backgroundTop());
@@ -560,10 +639,10 @@ void MenuApp::renderSettings() {
 
     const int16_t item_x = 18;
     const int16_t item_width = static_cast<int16_t>(screen_width - 36);
-    const int16_t first_y = 46;
-    const int16_t gap = 34;
+    const int16_t first_y = 44;
+    const int16_t gap = 30;
 
-    for (int item = 0; item < 3; ++item) {
+    for (int item = 0; item < 4; ++item) {
         const int16_t y = static_cast<int16_t>(first_y + item * gap);
         const bool selected = selected_settings_item_ == item;
         const Display::Color fill = selected ? selectedColor() : panelColor();
@@ -578,8 +657,15 @@ void MenuApp::renderSettings() {
             const int16_t mode_x = static_cast<int16_t>(screen_width - display_.measureTextWidth(mode_text, 1) - 30);
             display_.drawText(mode_x, static_cast<int16_t>(y + 9), mode_text, accentColor(), 1);
         } else if (item == 1) {
+            char volume_text[12];
+            formatVolumeText(volume_text, sizeof(volume_text), audio_.volume());
             display_.drawText(static_cast<int16_t>(item_x + 12), static_cast<int16_t>(y + 9),
-                              "GAME AUDIO", Display::rgb565(255, 255, 255), 1);
+                              "MASTER VOLUME", Display::rgb565(255, 255, 255), 1);
+            const int16_t volume_x = static_cast<int16_t>(screen_width - display_.measureTextWidth(volume_text, 1) - 30);
+            display_.drawText(volume_x, static_cast<int16_t>(y + 9), volume_text, accentColor(), 1);
+        } else if (item == 2) {
+            display_.drawText(static_cast<int16_t>(item_x + 12), static_cast<int16_t>(y + 9),
+                              "AUDIO", Display::rgb565(255, 255, 255), 1);
             const char* audio_text = audioSettingName();
             const int16_t audio_x = static_cast<int16_t>(screen_width - display_.measureTextWidth(audio_text, 1) - 30);
             display_.drawText(audio_x, static_cast<int16_t>(y + 9), audio_text, accentColor(), 1);
@@ -595,22 +681,31 @@ void MenuApp::renderSettings() {
     std::snprintf(config_text, sizeof(config_text), "SPI %lu MHz   FPS %lu",
                   static_cast<unsigned long>(display_.spiClockHz() / 1000000u),
                   static_cast<unsigned long>(display_.targetFps()));
-    drawCenteredText(142, config_text, Display::rgb565(160, 220, 255), 1);
-    drawCenteredText(156, "QUIET = 10MHZ / 30FPS", Display::rgb565(220, 220, 220), 1);
-    drawCenteredText(168, "ORIGINAL = 20MHZ / 60FPS", Display::rgb565(220, 220, 220), 1);
-    drawCenteredText(180, "AUDIO = GAMES + DIAGNOSTIC ONLY", Display::rgb565(220, 220, 220), 1);
+
+    const int16_t footer_x = 14;
+    const int16_t footer_y = 158;
+    const int16_t footer_width = static_cast<int16_t>(screen_width - 28);
+    const int16_t footer_height = static_cast<int16_t>(screen_height - footer_y - 10);
+    display_.fillRect(footer_x, footer_y, footer_width, footer_height, panelColor());
+    display_.drawRect(footer_x, footer_y, footer_width, footer_height, Display::rgb565(70, 90, 130));
+
+    drawCenteredText(166, config_text, Display::rgb565(160, 220, 255), 1);
+    drawCenteredText(178, "GLOBAL VOLUME APPLIES EVERYWHERE", Display::rgb565(220, 220, 220), 1);
+    drawCenteredText(190, "QUIET 10MHZ/30FPS  ORIGINAL 20MHZ/60FPS", Display::rgb565(220, 220, 220), 1);
 
     if (notice_text_[0] != '\0' && !timeReached(notice_until_)) {
-        drawCenteredText(194, notice_text_.data(), Display::rgb565(255, 220, 140), 1);
+        drawCenteredText(202, notice_text_.data(), Display::rgb565(255, 220, 140), 1);
     } else if (selected_settings_item_ == 0) {
-        drawCenteredText(194, "LEFT/RIGHT/A TO SWITCH DISPLAY MODE", Display::rgb565(255, 220, 140), 1);
+        drawCenteredText(202, "LEFT/RIGHT/A TO SWITCH DISPLAY MODE", Display::rgb565(255, 220, 140), 1);
     } else if (selected_settings_item_ == 1) {
-        drawCenteredText(194, "LEFT/RIGHT/A TO TOGGLE GAME AUDIO", Display::rgb565(255, 220, 140), 1);
+        drawCenteredText(202, "LEFT/RIGHT CHANGE  A TO MUTE", Display::rgb565(255, 220, 140), 1);
+    } else if (selected_settings_item_ == 2) {
+        drawCenteredText(202, "LEFT/RIGHT/A TO TOGGLE AUDIO", Display::rgb565(255, 220, 140), 1);
     } else {
-        drawCenteredText(194, "RUN THE DIAGNOSTIC LISTEN TEST", Display::rgb565(255, 220, 140), 1);
+        drawCenteredText(202, "RUN THE DIAGNOSTIC LISTEN TEST", Display::rgb565(255, 220, 140), 1);
     }
 
-    drawCenteredText(214, "B OR SELECT = BACK", Display::rgb565(200, 200, 200), 1);
+    drawCenteredText(210, "B OR SELECT = BACK", Display::rgb565(255, 255, 255), 1);
     display_.present();
 }
 

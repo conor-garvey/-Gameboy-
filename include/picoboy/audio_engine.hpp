@@ -9,15 +9,24 @@ namespace picoboy {
 
 enum class SoundEffect : uint8_t {
     PowerOn,
+    StartupScreen,
     MenuMove,
     Coin,
     EnemyStomp,
+    Death,
+};
+
+enum class MusicTrack : uint8_t {
+    Menu,
+    PlumberMan,
+    SkyDodger,
 };
 
 class AudioEngine {
 public:
     static constexpr uint8_t DefaultPwmPin = 16;
     static constexpr uint8_t MaxVolume = 10;
+    static constexpr uint8_t DefaultVolume = 1;
 
     enum class Waveform : uint8_t {
         Pulse12,
@@ -43,7 +52,7 @@ public:
     AudioEngine();
 
     void init(uint8_t pwm_pin = DefaultPwmPin);
-    void startBackgroundMusic();
+    void startBackgroundMusic(MusicTrack track = MusicTrack::Menu);
     void stopBackgroundMusic();
     void playEffect(SoundEffect effect);
     void stop();
@@ -62,6 +71,7 @@ private:
     void enableOutput();
     void disableOutput();
     bool hasActivePlayback() const;
+    void startPcmEffect(const uint8_t* data, size_t sample_count, uint32_t clip_sample_rate_hz, bool pause_music);
     int16_t nextEffectSample();
     int16_t nextMusicSample();
     uint8_t nextPwmLevel();
@@ -69,7 +79,7 @@ private:
     bool initialized_ = false;
     uint8_t pwm_pin_ = DefaultPwmPin;
     uint8_t pwm_slice_ = 0;
-    uint8_t volume_ = 8;
+    uint8_t volume_ = DefaultVolume;
     bool output_enabled_ = false;
     bool timer_running_ = false;
     repeating_timer_t timer_{};
@@ -93,6 +103,14 @@ private:
     uint32_t music_fraction_ = 0;
     uint32_t music_step_fp_ = 0;
     bool music_enabled_ = false;
+    bool music_paused_for_effect_ = false;
+    const uint8_t* effect_pcm_data_ = nullptr;
+    size_t effect_pcm_sample_count_ = 0;
+    uint32_t effect_pcm_index_ = 0;
+    uint32_t effect_pcm_fraction_ = 0;
+    uint32_t effect_pcm_step_fp_ = 0;
+    uint32_t music_resume_delay_samples_ = 0;
+    bool resume_music_after_effect_ = false;
     bool enabled_ = true;
 };
 

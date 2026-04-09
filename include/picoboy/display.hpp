@@ -58,6 +58,7 @@ public:
     void initializePanel();
     void setRotation(Rotation rotation);
     void setViewport(uint16_t width, uint16_t height);
+    void setViewportOffset(int16_t offset_x, int16_t offset_y);
     Rotation rotation() const;
     uint16_t width() const;
     uint16_t height() const;
@@ -143,6 +144,8 @@ private:
     uint16_t physical_height_;
     uint16_t viewport_x_;
     uint16_t viewport_y_;
+    int16_t viewport_offset_x_;
+    int16_t viewport_offset_y_;
     uint16_t width_;
     uint16_t height_;
     std::array<Command, MaxCommands> commands_;

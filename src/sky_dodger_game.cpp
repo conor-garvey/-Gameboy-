@@ -18,6 +18,7 @@ struct Rgb {
 
 constexpr float pi = 3.14159265f;
 constexpr float calibration_tilt_threshold_g = 0.05f;
+constexpr uint32_t death_sequence_lock_ms = 3600;
 
 float clamp01(float value) {
     if (value < 0.0f) {
@@ -95,6 +96,10 @@ bool intersects(int16_t ax, int16_t ay, int16_t aw, int16_t ah,
            ay + ah > by;
 }
 
+bool timeReached(absolute_time_t deadline) {
+    return absolute_time_diff_us(get_absolute_time(), deadline) <= 0;
+}
+
 }  // namespace
 
 SkyDodgerGame::SkyDodgerGame(Lsm6dsl& imu, AudioEngine& audio) : imu_(imu), audio_(audio) {}
@@ -107,19 +112,29 @@ void SkyDodgerGame::enter(const Display& display) {
     exit_requested_ = false;
     game_over_ = false;
     calibration_warning_ = false;
+    facing_left_ = false;
     run_report_pending_ = false;
     run_result_committed_ = false;
     pending_distance_ = 0;
+    pending_coins_ = 0;
+    coins_collected_ = 0;
     rng_state_ = 0x13579BDF;
     calibration_stage_ = CalibrationStage::HoldLevel;
     tilt_axis_ = TiltAxis::Y;
     steering_sign_ = 1.0f;
     neutral_x_g_ = 0.0f;
     neutral_y_g_ = 0.0f;
+    lose_selection_ = LoseSelection::Retry;
+    loss_input_unlock_at_ = get_absolute_time();
     resetRound(display);
 }
 
 void SkyDodgerGame::update(const Buttons& buttons, const Display& display) {
+    if (game_over_) {
+        updateLoseMenu(buttons, display);
+        return;
+    }
+
     if (buttons.pressed(ButtonId::Select)) {
         paused_ = !paused_;
         editing_volume_ = false;
@@ -170,15 +185,19 @@ void SkyDodgerGame::update(const Buttons& buttons, const Display& display) {
             }
 
             steering_sign_ = selected_delta >= 0.0f ? 1.0f : -1.0f;
-            calibration_stage_ = CalibrationStage::Ready;
+            calibration_stage_ = CalibrationStage::DifficultySelect;
             calibration_warning_ = false;
-            resetRound(display);
         }
         return;
     }
 
-    if (game_over_) {
-        if (buttons.pressed(ButtonId::Start) || buttons.pressed(ButtonId::A)) {
+    if (calibration_stage_ == CalibrationStage::DifficultySelect) {
+        if (buttons.pressed(ButtonId::Up)) {
+            difficulty_level_ = std::min(5, difficulty_level_ + 1);
+        } else if (buttons.pressed(ButtonId::Down)) {
+            difficulty_level_ = std::max(1, difficulty_level_ - 1);
+        } else if (buttons.pressed(ButtonId::A) || buttons.pressed(ButtonId::Start)) {
+            calibration_stage_ = CalibrationStage::Ready;
             resetRound(display);
         }
         return;
@@ -190,6 +209,11 @@ void SkyDodgerGame::update(const Buttons& buttons, const Display& display) {
     }
 
     const int16_t movement = static_cast<int16_t>(tilt_g * 14.0f);
+    if (movement < 0) {
+        facing_left_ = true;
+    } else if (movement > 0) {
+        facing_left_ = false;
+    }
     player_x_ = static_cast<int16_t>(player_x_ + movement);
 
     const int16_t max_player_x = static_cast<int16_t>(display.width() - PlayerWidth - 6);
@@ -205,12 +229,17 @@ void SkyDodgerGame::update(const Buttons& buttons, const Display& display) {
 
     updateClouds(display);
     updateHazards(display);
+    updateCoins(display);
 
     const int16_t player_y = static_cast<int16_t>(display.height() / 2 - PlayerHeight / 2);
     for (const Hazard& hazard : hazards_) {
-        if (intersects(player_x_, player_y, PlayerWidth, PlayerHeight,
+        if (hazard.active && intersects(player_x_, player_y, PlayerWidth, PlayerHeight,
                        hazard.x, hazard.y, hazard.width, hazard.height)) {
             game_over_ = true;
+            lose_selection_ = LoseSelection::Retry;
+            loss_input_unlock_at_ = delayed_by_ms(get_absolute_time(), death_sequence_lock_ms);
+            audio_.stopBackgroundMusic();
+            audio_.playEffect(SoundEffect::Death);
             finalizeRun();
             break;
         }
@@ -276,7 +305,7 @@ void SkyDodgerGame::render(Display& display) const {
     const Display::Color balloon_basket = Display::rgb565(158, 96, 38);
     const Display::Color balloon_face = Display::rgb565(42, 34, 50);
     for (const Hazard& hazard : hazards_) {
-        if (hazard.x + hazard.width < 0 || hazard.x >= screen_width ||
+        if (!hazard.active || hazard.x + hazard.width < 0 || hazard.x >= screen_width ||
             hazard.y + hazard.height < 0 || hazard.y >= screen_height) {
             continue;
         }
@@ -325,7 +354,28 @@ void SkyDodgerGame::render(Display& display) const {
         }
     }
 
-    drawPlayerAvatar(display, player_x_, player_y, avatar_);
+    // Render coins
+    for (const Coin& coin : coins_) {
+        if (coin.active && !coin.collected) {
+            // Draw larger, more obvious coin (8x8 instead of 4x4)
+            display.fillRect(coin.x + 2, coin.y + 2, 8, 8, Display::rgb565(255, 215, 0));
+            display.drawRect(coin.x + 2, coin.y + 2, 8, 8, Display::rgb565(200, 150, 0));
+            // Add coin details - small inner highlight
+            display.fillRect(coin.x + 4, coin.y + 4, 4, 4, Display::rgb565(255, 235, 100));
+            // Add a small "C" or star pattern in the center
+            display.drawPixel(coin.x + 5, coin.y + 5, Display::rgb565(180, 120, 0));
+            display.drawPixel(coin.x + 6, coin.y + 5, Display::rgb565(180, 120, 0));
+            display.drawPixel(coin.x + 5, coin.y + 6, Display::rgb565(180, 120, 0));
+        }
+    }
+
+    AvatarPose avatar_pose = AvatarPose::Idle;
+    if (game_over_) {
+        avatar_pose = AvatarPose::Death;
+    } else if (calibration_stage_ == CalibrationStage::Ready && !paused_) {
+        avatar_pose = AvatarPose::Jump;
+    }
+    drawPlayerAvatar(display, player_x_, player_y, avatar_, avatar_pose, facing_left_);
 
     display.drawText(10, 8, "SKY DODGER", Display::rgb565(255, 255, 255), 1);
 
@@ -333,6 +383,11 @@ void SkyDodgerGame::render(Display& display) const {
     std::snprintf(distance_text, sizeof(distance_text), "DIST %ld", static_cast<long>(distance_));
     const int16_t distance_x = static_cast<int16_t>(screen_width - display.measureTextWidth(distance_text, 1) - 10);
     display.drawText(distance_x > 10 ? distance_x : 10, 8, distance_text, Display::rgb565(255, 228, 120), 1);
+
+    char coin_text[16];
+    std::snprintf(coin_text, sizeof(coin_text), "COINS %lu", static_cast<unsigned long>(coins_collected_));
+    const int16_t coin_x = static_cast<int16_t>(screen_width - display.measureTextWidth(coin_text, 1) - 10);
+    display.drawText(coin_x > 10 ? coin_x : 10, 20, coin_text, Display::rgb565(255, 215, 0), 1);
 
     if (!imu_.ready()) {
         display.fillRect(20, static_cast<int16_t>(screen_height / 2 - 28), static_cast<int16_t>(screen_width - 40), 56,
@@ -355,6 +410,19 @@ void SkyDodgerGame::render(Display& display) const {
                              Display::rgb565(255, 255, 255), 2);
             display.drawText(52, static_cast<int16_t>(screen_height / 2 + 10), "PRESS A OR START",
                              Display::rgb565(180, 220, 255), 1);
+        } else if (calibration_stage_ == CalibrationStage::DifficultySelect) {
+            display.drawText(46, static_cast<int16_t>(screen_height / 2 - 28), "SELECT DIFFICULTY",
+                             Display::rgb565(255, 255, 255), 2);
+            
+            char difficulty_text[16];
+            std::snprintf(difficulty_text, sizeof(difficulty_text), "LEVEL %d", difficulty_level_);
+            display.drawText(70, static_cast<int16_t>(screen_height / 2 - 4), difficulty_text,
+                             Display::rgb565(255, 196, 48), 2);
+            
+            display.drawText(34, static_cast<int16_t>(screen_height / 2 + 18), "UP/DOWN: CHANGE LEVEL",
+                             Display::rgb565(180, 220, 255), 1);
+            display.drawText(46, static_cast<int16_t>(screen_height / 2 + 30), "A/START: BEGIN GAME",
+                             Display::rgb565(180, 220, 255), 1);
         } else {
             display.drawText(40, static_cast<int16_t>(screen_height / 2 - 22), "TILT TO ONE SIDE",
                              Display::rgb565(255, 255, 255), 2);
@@ -369,23 +437,18 @@ void SkyDodgerGame::render(Display& display) const {
 
         const int16_t preview_x = static_cast<int16_t>((screen_width - PlayerWidth) / 2);
         const int16_t preview_y = static_cast<int16_t>(screen_height - 42);
-        drawPlayerAvatar(display, preview_x, preview_y, avatar_);
+        drawPlayerAvatar(display, preview_x, preview_y, avatar_, AvatarPose::Idle, false);
 
         display.drawText(64, static_cast<int16_t>(screen_height - 16), "SELECT PAUSE",
                          Display::rgb565(220, 220, 240), 1);
     } else if (game_over_) {
-        display.fillRect(34, static_cast<int16_t>(screen_height / 2 - 34), static_cast<int16_t>(screen_width - 68), 68,
-                         Display::rgb565(28, 36, 72));
-        display.drawRect(34, static_cast<int16_t>(screen_height / 2 - 34), static_cast<int16_t>(screen_width - 68), 68,
-                         Display::rgb565(255, 196, 48));
-        display.drawText(58, static_cast<int16_t>(screen_height / 2 - 18), "MID-AIR CRASH", Display::rgb565(255, 255, 255), 2);
-        display.drawText(64, static_cast<int16_t>(screen_height / 2 + 12), "START TO RETRY", Display::rgb565(180, 220, 255), 1);
+        renderLoseOverlay(display);
     } else {
         display.drawText(10, static_cast<int16_t>(screen_height - 16), "TILT TO DRIFT  SELECT PAUSE",
                          Display::rgb565(220, 220, 240), 1);
     }
 
-    if (paused_) {
+    if (paused_ && !game_over_) {
         renderPauseOverlay(display);
     }
 
@@ -400,12 +463,13 @@ void SkyDodgerGame::clearExitRequest() {
     exit_requested_ = false;
 }
 
-bool SkyDodgerGame::consumeFinishedRun(uint32_t& distance) {
+bool SkyDodgerGame::consumeFinishedRun(uint32_t& distance, uint32_t& coins) {
     if (!run_report_pending_) {
         return false;
     }
 
     distance = pending_distance_;
+    coins = pending_coins_;
     run_report_pending_ = false;
     return true;
 }
@@ -413,19 +477,34 @@ bool SkyDodgerGame::consumeFinishedRun(uint32_t& distance) {
 void SkyDodgerGame::resetRound(const Display& display) {
     const int16_t screen_width = static_cast<int16_t>(display.width());
     player_x_ = static_cast<int16_t>((screen_width - PlayerWidth) / 2);
+    facing_left_ = false;
     distance_ = 0;
+    coins_collected_ = 0;
     frame_count_ = 0;
     game_over_ = false;
     exit_requested_ = false;
     paused_ = false;
     editing_volume_ = false;
     pause_selection_ = PauseSelection::ReturnToMenu;
+    lose_selection_ = LoseSelection::Retry;
     run_result_committed_ = false;
+    loss_input_unlock_at_ = get_absolute_time();
 
     seedClouds(display);
 
     for (size_t index = 0; index < hazards_.size(); ++index) {
-        spawnHazard(hazards_[index], display, true);
+        if (index < static_cast<size_t>(difficulty_level_ + 2)) { // Level 1: 3, Level 2: 4, Level 3: 5, Level 4: 6, Level 5: 7 hazards
+            spawnHazard(hazards_[index], display, true);
+            hazards_[index].active = true;
+        } else {
+            hazards_[index].active = false;
+            hazards_[index].x = -100; // Position off-screen
+            hazards_[index].y = -100;
+        }
+    }
+
+    for (size_t index = 0; index < coins_.size(); ++index) {
+        spawnCoin(coins_[index], display, true);
     }
 }
 
@@ -474,21 +553,22 @@ void SkyDodgerGame::updateClouds(const Display& display) {
 void SkyDodgerGame::spawnHazard(Hazard& hazard, const Display& display, bool initial_spawn) {
     const int16_t screen_width = static_cast<int16_t>(display.width());
     const int16_t screen_height = static_cast<int16_t>(display.height());
-    const int16_t difficulty = static_cast<int16_t>(std::min<int32_t>(4, distance_ / 500));
+    // Map difficulty level (1-5) to hazard difficulty, with 3 as baseline
+    const int16_t difficulty = static_cast<int16_t>(difficulty_level_ - 3 + 3); // Level 3 = 3, Level 1 = 1, Level 5 = 7
 
-    if ((nextRandom() % 4u) == 0u) {
+    if ((nextRandom() % 3u) == 0u) {
         hazard.kind = HazardKind::Balloon;
         hazard.variant = static_cast<uint8_t>(nextRandom() % 4u);
-        hazard.width = 14;
-        hazard.height = 22;
-        hazard.dx = static_cast<int16_t>(static_cast<int32_t>(nextRandom() % 3u) - 1);
+        hazard.width = 16;
+        hazard.height = 24;
+        hazard.dx = static_cast<int16_t>(static_cast<int32_t>(nextRandom() % 5u) - 2);
         hazard.dy = static_cast<int16_t>(-2 - difficulty / 2 - static_cast<int16_t>(nextRandom() % 2u));
 
         const uint32_t spawn_span = static_cast<uint32_t>(std::max<int16_t>(1, static_cast<int16_t>(screen_width - hazard.width - 12)));
         hazard.x = static_cast<int16_t>(6 + nextRandom() % spawn_span);
 
         const int16_t entry_gap = initial_spawn
-            ? static_cast<int16_t>(24 + nextRandom() % static_cast<uint32_t>(screen_height / 2 + 30))
+            ? static_cast<int16_t>(16 + nextRandom() % static_cast<uint32_t>(screen_height + 20))
             : static_cast<int16_t>(12 + nextRandom() % 24u);
         hazard.y = static_cast<int16_t>(screen_height + entry_gap);
         return;
@@ -500,10 +580,10 @@ void SkyDodgerGame::spawnHazard(Hazard& hazard, const Display& display, bool ini
     hazard.height = 12;
 
     const bool from_left = (nextRandom() & 1u) == 0;
-    const int16_t speed = static_cast<int16_t>(3 + difficulty + static_cast<int16_t>(nextRandom() % 2));
+    const int16_t speed = static_cast<int16_t>(4 + difficulty + static_cast<int16_t>(nextRandom() % 3));
     hazard.dx = from_left ? speed : static_cast<int16_t>(-speed);
     hazard.dy = static_cast<int16_t>(-2 - difficulty / 2);
-    hazard.y = static_cast<int16_t>(36 + nextRandom() % static_cast<uint32_t>(screen_height - 72));
+    hazard.y = static_cast<int16_t>(16 + nextRandom() % static_cast<uint32_t>(screen_height - 32));
     const int16_t entry_gap = initial_spawn
         ? static_cast<int16_t>(28 + nextRandom() % static_cast<uint32_t>(screen_width / 2 + 30))
         : 10;
@@ -519,6 +599,10 @@ void SkyDodgerGame::updateHazards(const Display& display) {
     const int16_t screen_width = static_cast<int16_t>(display.width());
 
     for (Hazard& hazard : hazards_) {
+        if (!hazard.active) {
+            continue;
+        }
+        
         hazard.x = static_cast<int16_t>(hazard.x + hazard.dx);
         hazard.y = static_cast<int16_t>(hazard.y + hazard.dy);
 
@@ -532,14 +616,86 @@ void SkyDodgerGame::updateHazards(const Display& display) {
     }
 }
 
+void SkyDodgerGame::spawnCoin(Coin& coin, const Display& display, bool initial_spawn) {
+    const int16_t screen_width = static_cast<int16_t>(display.width());
+    const int16_t screen_height = static_cast<int16_t>(display.height());
+
+    coin.x = static_cast<int16_t>(nextRandom() % static_cast<uint32_t>(screen_width - 12));
+    coin.y = initial_spawn
+        ? static_cast<int16_t>(nextRandom() % static_cast<uint32_t>(screen_height - 12))
+        : static_cast<int16_t>(screen_height + 20 + (nextRandom() % 80));
+    coin.collected = false;
+    coin.active = true;
+}
+
+void SkyDodgerGame::updateCoins(const Display& display) {
+    const int16_t screen_height = static_cast<int16_t>(display.height());
+
+    for (Coin& coin : coins_) {
+        if (!coin.active || coin.collected) {
+            continue;
+        }
+
+        // Coins move upwards faster with the background
+        coin.y -= 5;
+
+        // Respawn coin if it goes off screen
+        if (coin.y < -24) {
+            spawnCoin(coin, display, false);
+        }
+
+        // Check collision with player (player is at center of screen) - updated for larger coin
+        const int16_t player_y = static_cast<int16_t>(display.height() / 2 - PlayerHeight / 2);
+        const bool collision = player_x_ < coin.x + 12 && player_x_ + PlayerWidth > coin.x &&
+                              player_y < coin.y + 12 && player_y + PlayerHeight > coin.y;
+        if (collision && !coin.collected) {
+            coin.collected = true;
+            coin.active = false;
+            coins_collected_++;
+            audio_.playEffect(SoundEffect::Coin);
+        }
+    }
+}
+
 void SkyDodgerGame::finalizeRun() {
     if (calibration_stage_ != CalibrationStage::Ready || run_result_committed_) {
         return;
     }
 
     pending_distance_ = distance_ > 0 ? static_cast<uint32_t>(distance_) : 0;
+    pending_coins_ = coins_collected_;
     run_report_pending_ = true;
     run_result_committed_ = true;
+}
+
+void SkyDodgerGame::updateLoseMenu(const Buttons& buttons, const Display& display) {
+    if (!timeReached(loss_input_unlock_at_)) {
+        return;
+    }
+
+    if (buttons.pressed(ButtonId::Up) || buttons.pressed(ButtonId::Down) ||
+        buttons.pressed(ButtonId::Left) || buttons.pressed(ButtonId::Right)) {
+        lose_selection_ = lose_selection_ == LoseSelection::Retry
+            ? LoseSelection::ReturnToMenu
+            : LoseSelection::Retry;
+        audio_.playEffect(SoundEffect::MenuMove);
+    }
+
+    if (buttons.pressed(ButtonId::B) || buttons.pressed(ButtonId::Select)) {
+        exit_requested_ = true;
+        audio_.playEffect(SoundEffect::MenuMove);
+        return;
+    }
+
+    if (buttons.pressed(ButtonId::A) || buttons.pressed(ButtonId::Start)) {
+        if (lose_selection_ == LoseSelection::Retry) {
+            resetRound(display);
+            audio_.startBackgroundMusic(MusicTrack::SkyDodger);
+        } else {
+            exit_requested_ = true;
+        }
+        audio_.playEffect(SoundEffect::MenuMove);
+    }
 }
 
 void SkyDodgerGame::updatePauseMenu(const Buttons& buttons) {
@@ -592,6 +748,39 @@ void SkyDodgerGame::updatePauseMenu(const Buttons& buttons) {
 
 void SkyDodgerGame::adjustVolume(int delta) {
     audio_.changeVolume(delta);
+}
+
+void SkyDodgerGame::renderLoseOverlay(Display& display) const {
+    const int16_t screen_width = static_cast<int16_t>(display.width());
+    const int16_t screen_height = static_cast<int16_t>(display.height());
+    const int16_t box_width = 224;
+    const int16_t box_height = 96;
+    const int16_t box_x = static_cast<int16_t>((screen_width - box_width) / 2);
+    const int16_t box_y = static_cast<int16_t>((screen_height - box_height) / 2);
+    const bool input_ready = timeReached(loss_input_unlock_at_);
+    const Display::Color highlight = Display::rgb565(54, 120, 200);
+
+    display.fillRect(box_x, box_y, box_width, box_height, Display::rgb565(28, 36, 72));
+    display.drawRect(box_x, box_y, box_width, box_height, Display::rgb565(255, 196, 48));
+    display.drawText(static_cast<int16_t>(box_x + 40), static_cast<int16_t>(box_y + 10), "MID-AIR CRASH",
+                     Display::rgb565(255, 255, 255), 2);
+
+    const bool retry_selected = lose_selection_ == LoseSelection::Retry && input_ready;
+    const bool menu_selected = lose_selection_ == LoseSelection::ReturnToMenu && input_ready;
+    if (retry_selected) {
+        display.fillRect(static_cast<int16_t>(box_x + 18), static_cast<int16_t>(box_y + 40), 188, 14, highlight);
+    }
+    if (menu_selected) {
+        display.fillRect(static_cast<int16_t>(box_x + 18), static_cast<int16_t>(box_y + 60), 188, 14, highlight);
+    }
+
+    display.drawText(static_cast<int16_t>(box_x + 26), static_cast<int16_t>(box_y + 43), "FLY AGAIN",
+                     Display::rgb565(255, 255, 255), 1);
+    display.drawText(static_cast<int16_t>(box_x + 26), static_cast<int16_t>(box_y + 63), "RETURN TO MENU",
+                     Display::rgb565(255, 255, 255), 1);
+    display.drawText(static_cast<int16_t>(box_x + 18), static_cast<int16_t>(box_y + 80),
+                     input_ready ? "UP/DOWN CHOOSE  A/START OK" : "PLEASE WAIT...",
+                     Display::rgb565(200, 200, 220), 1);
 }
 
 void SkyDodgerGame::renderPauseOverlay(Display& display) const {
